@@ -1,0 +1,27 @@
+# OTel Collector + Jaeger — standalone observability stack.
+#
+# Usage:
+#   podman compose up -d
+#   open http://localhost:16686   # Jaeger UI
+#
+# Send traces to grpc://localhost:4317 or http://localhost:4318.
+# For cloud-agents, set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317.
+
+services:
+  otel-collector:
+    image: docker.io/otel/opentelemetry-collector-contrib:0.115.1
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  jaeger:
+    image: docker.io/jaegertracing/jaeger:2.4.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
