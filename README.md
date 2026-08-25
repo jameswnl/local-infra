@@ -134,6 +134,23 @@ plumbed through this Makefile — pass it via a second `-f`/`--set` on top of
 `ocp-openshell-up`'s helm invocation, or make the repository public as this
 setup does).
 
+### Diagnostics
+
+```bash
+make ocp-test-eacces-repro   # requires ocp-register first
+```
+
+Tests for a real, unresolved OCP `kubernetes`-driver bug — see
+`~/ws/lightspeed-stack/docs/design/cloud-agents/prod/ocp-sandbox-file-read-eacces.md`:
+on some OCP clusters, any file added to a sandbox image in a layer *after*
+its base image returns `EACCES` on read, even though permissions/ownership
+look completely normal. Checking existence or the executable bit (`command
+-v`, `which`) does **not** exercise this — it needs an actual `open()` and
+an actual execution. The script does both: reads a base-image file
+(control), reads a file `COPY`'d in a later layer (repro), and executes a
+later-layer script (repro), then reports PASS/FAIL for each and cleans up
+the sandbox. Same script backs `ocp-prod-test-eacces-repro` below.
+
 ### Gotchas
 
 - **Sandbox image architecture.** `podman build` on Apple Silicon produces
@@ -224,7 +241,8 @@ OCP_PROD_OIDC_ISSUER=http://keycloak.keycloak.svc.cluster.local:9090/realms/open
 make ocp-prod-openshell-up
 
 make ocp-prod-status
-make ocp-prod-register   # openshell gateway add <hostname> --oidc-issuer ... + login
+make ocp-prod-register        # openshell gateway add <hostname> --oidc-issuer ... + login
+make ocp-prod-test-eacces-repro  # see Diagnostics under Eval above
 make ocp-prod-openshell-down
 ```
 

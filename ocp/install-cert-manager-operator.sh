@@ -55,4 +55,26 @@ done
 
 echo "Waiting for cert-manager operand pods..."
 oc -n cert-manager wait --for=condition=Available deployment/cert-manager deployment/cert-manager-webhook deployment/cert-manager-cainjector --timeout=180s
+
+# The webhook Deployment reports Available before cainjector has finished
+# propagating its CA bundle into the ValidatingWebhookConfiguration -- any
+# Certificate/Issuer/ClusterIssuer applied in that window fails with
+# "x509: certificate signed by unknown authority" even though every pod is
+# up. Probe the webhook itself with a real admission request (dry-run
+# apply) instead of trusting Deployment status.
+echo "Waiting for the cert-manager webhook CA bundle to propagate..."
+probe='apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: cert-manager-webhook-probe
+spec:
+  selfSigned: {}'
+for _ in $(seq 1 24); do
+  if echo "${probe}" | oc apply --dry-run=server -f - >/dev/null 2>&1; then
+    echo "cert-manager webhook is ready."
+    break
+  fi
+  sleep 5
+done
+
 echo "cert-manager is running."

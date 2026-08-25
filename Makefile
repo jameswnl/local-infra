@@ -42,11 +42,11 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         kind-openshell-up kind-openshell-down kind-openshell-logs kind-openshell-health kind-openshell-register \
         ocp-up ocp-status ocp-agent-sandbox-up \
         ocp-openshell-up ocp-openshell-down ocp-openshell-logs \
-        ocp-port-forward ocp-register \
+        ocp-port-forward ocp-register ocp-test-eacces-repro \
         ocp-prod-check ocp-prod-up ocp-prod-status ocp-prod-agent-sandbox-up \
         ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up \
         ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs \
-        ocp-prod-register ocp-prod-quickstart
+        ocp-prod-register ocp-prod-quickstart ocp-prod-test-eacces-repro
 
 # ---------- Podman Compose ----------
 
@@ -178,6 +178,9 @@ ocp-port-forward:  ## Port-forward the OpenShift gateway to localhost:8080 (fore
 ocp-register:  ## Register the OpenShift gateway with the OpenShell CLI (one-time)
 	openshell gateway add http://127.0.0.1:8080 --local --name $(OCP_GATEWAY_NAME)
 
+ocp-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-register first)
+	./ocp/test-eacces-repro.sh $(OCP_GATEWAY_NAME) $(OCP_PROJECT) $(OCP_SANDBOX_IMAGE)
+
 # ---------- OpenShift (oc) — Production ----------
 #
 # Real server certificate (cert-manager) + OpenShift Route (TLS passthrough)
@@ -261,6 +264,9 @@ ocp-prod-openshell-logs:  ## Tail OpenShell gateway logs in production
 ocp-prod-register:  ## Register the production gateway with the OpenShell CLI over OIDC
 	openshell gateway add https://$(OCP_PROD_HOSTNAME) --name $(OCP_PROD_GATEWAY_NAME) --oidc-issuer $(OCP_PROD_OIDC_ISSUER)
 	openshell gateway login $(OCP_PROD_GATEWAY_NAME)
+
+ocp-prod-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-prod-register first)
+	./ocp/test-eacces-repro.sh $(OCP_PROD_GATEWAY_NAME) $(OCP_PROD_PROJECT) $(OCP_PROD_SANDBOX_IMAGE)
 
 ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up  ## One-shot prod deploy on a brand-new cluster: bootstraps self-signed CA + dev Keycloak, computes a hostname, deploys
 	@host="$(OCP_PROD_HOSTNAME)"; \
