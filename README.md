@@ -114,6 +114,105 @@ mTLS certs from a Docker container. If it fails with a Docker socket
 error, build the CLI from the OpenShell repo (`cargo build -p
 openshell-cli`) instead of using an older installed binary.
 
+## OpenShift (OCP) — Production
+
+Separate `ocp-prod-*` targets and variables from the eval ones above — own
+project, own release name, own env vars — so both can be deployed to the
+same or different clusters at once without clobbering each other. Follows
+the "Production" path in `docs/kubernetes/openshift.mdx`: a real server
+certificate via cert-manager, an OpenShift Route with TLS passthrough, and
+OIDC for CLI auth (no `allowUnauthenticatedUsers` bypass).
+
+One-time cluster setup (skip whichever piece you already have):
+
+```bash
+make ocp-prod-cert-manager-up            # installs cert-manager via OLM (Red Hat operator)
+
+# If you don't have a real Issuer/ClusterIssuer yet (e.g. no ACME/corporate CA):
+make ocp-prod-clusterissuer-selfsigned   # bootstraps a self-signed CA + ClusterIssuer
+
+# If you don't have a real OIDC provider yet:
+make ocp-prod-keycloak-up                # deploys a dev-grade Keycloak with a working realm
+```
+
+Then deploy (example values match the bootstrap self-signed issuer + dev Keycloak above):
+
+```bash
+make ocp-prod-check \
+  OCP_PROD_HOSTNAME=openshell-prod.example.com \
+  OCP_PROD_CLUSTER_ISSUER=openshell-selfsigned-ca \
+  OCP_PROD_OIDC_ISSUER=http://keycloak.keycloak.svc.cluster.local:9090/realms/openshell
+
+OCP_PROD_HOSTNAME=openshell-prod.example.com \
+OCP_PROD_CLUSTER_ISSUER=openshell-selfsigned-ca \
+OCP_PROD_OIDC_ISSUER=http://keycloak.keycloak.svc.cluster.local:9090/realms/openshell \
+make ocp-prod-openshell-up
+
+make ocp-prod-status
+make ocp-prod-register   # openshell gateway add <hostname> --oidc-issuer ... + login
+make ocp-prod-openshell-down
+```
+
+I've run this exact sequence end-to-end against a real OCP cluster (self-signed
+issuer + dev Keycloak): the gateway comes up with `TLS enabled`, `OIDC
+authentication enabled`, successfully discovers Keycloak's JWKS, and its
+logged discovered issuer matches token `iss` claims exactly. What I didn't
+verify is a literal `openshell gateway login` browser round-trip, since that
+needs a real, browser-reachable hostname (see the two notes below for why
+`openshell-prod.example.com` alone isn't enough).
+
+`OCP_PROD_HOSTNAME`, `OCP_PROD_CLUSTER_ISSUER`, and `OCP_PROD_OIDC_ISSUER`
+have no defaults — `ocp-prod-check` (which `ocp-prod-openshell-up` always
+runs first) fails with a clear message if any are missing, if `oc` isn't
+logged in, if cert-manager isn't installed, or if the named ClusterIssuer
+isn't `Ready`. Other overridable variables: `OCP_PROD_PROJECT` (default
+`openshell-prod`), `OCP_PROD_RELEASE` (default `openshell-prod` — must
+differ from the eval path's `openshell`; see note below),
+`OCP_PROD_OIDC_AUDIENCE` (default `openshell-cli`), `OCP_PROD_SANDBOX_IMAGE`.
+
+Notes:
+- `ocp-prod-cert-manager-up` installs Red Hat's official cert-manager
+  Operator via OLM (`redhat-operators` catalog, `stable-v1` channel) —
+  cluster-scoped and shared, so `ocp-prod-openshell-down` intentionally
+  leaves it in place.
+- `ocp-prod-clusterissuer-selfsigned` is a bootstrap convenience, not a
+  substitute for a real ACME/corporate issuer: the resulting cert is not
+  publicly trusted, so CLI clients need the CA cert to verify the
+  connection (or `--gateway-insecure`). Swap in a real
+  `Issuer`/`ClusterIssuer` and point `OCP_PROD_CLUSTER_ISSUER` at it once
+  you have one.
+- `ocp-prod-keycloak-up` deploys Keycloak into its own `keycloak` namespace
+  (not `OCP_PROD_PROJECT`) with an in-memory DB — state (including the
+  imported realm) is lost on pod restart, but `--import-realm` re-imports
+  it automatically. Test users: `admin@test` / `admin` (role
+  `openshell-admin`) and `user@test` / `user` (role `openshell-user`),
+  client `openshell-cli` (public, Authorization Code + PKCE and direct
+  access grants both enabled).
+- **Keycloak's `iss` claim always reflects the actual port a request
+  arrived on**, regardless of `KC_HOSTNAME_STRICT`/`KC_HOSTNAME_PORT`
+  settings (verified empirically against Keycloak 24, contradicting what
+  those settings are documented to do). So the dev Keycloak Service
+  listens on port 9090 (not the HTTP default 80) — the same port used for
+  `kubectl port-forward` — so tokens obtained via a local port-forward and
+  tokens validated by the in-cluster gateway carry an identical `iss`. If
+  you change `KEYCLOAK_SETUP_PORT`, re-verify token issuers still match
+  before trusting the deployment.
+- The chart creates a cluster-scoped `ClusterRole`/`ClusterRoleBinding`
+  named after the Helm release (`<release>-node-reader`, etc.). Two
+  releases with the same name anywhere on the cluster collide even in
+  different namespaces — this is why `OCP_PROD_RELEASE` defaults to
+  `openshell-prod` rather than reusing the eval path's `openshell`.
+- Registering the CLI against a self-signed cert + a hostname that isn't
+  real DNS (like the `openshell-prod.example.com` example above) won't
+  work as-is: `openshell gateway add` needs to actually reach the
+  hostname and trust its certificate. For a real deployment, point
+  `OCP_PROD_HOSTNAME` at a real, resolvable domain; for local proof-of-concept
+  registration against the example above, add a `/etc/hosts` entry
+  pointing it at a `oc port-forward`'d local address and use
+  `openshell gateway add --gateway-insecure` to skip cert trust.
+- Same sandbox-image architecture caveat as the eval path applies here —
+  see below.
+
 ## Architecture
 
 ```
