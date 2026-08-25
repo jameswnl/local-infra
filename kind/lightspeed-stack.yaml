@@ -1,0 +1,203 @@
+# lightspeed-stack deployment for Kind, wired to the openshell-gateway
+# already deployed in this cluster (same namespace, reached via short
+# in-cluster Service DNS). Includes a throwaway Postgres for
+# WorkflowStorageFactory + conversation_cache.
+#
+# Requires the harness-only image (see
+# ~/ws/lightspeed-stack/deploy/lightspeed-stack/Containerfile.harness)
+# loaded into the Kind node -- the official product image has no
+# cloud_agents dependency.
+#
+# The real LLM credential is NOT in this file. Create it separately:
+#   kubectl --context kind-local-infra -n openshell create secret generic \
+#     lightspeed-stack-llm-secret --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lightspeed-stack-secrets
+  namespace: openshell
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: lightspeed
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightspeed-postgres
+  namespace: openshell
+  labels:
+    app: lightspeed-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lightspeed-postgres
+  template:
+    metadata:
+      labels:
+        app: lightspeed-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: lightspeed
+            - name: POSTGRES_DB
+              value: lightspeed
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lightspeed-stack-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "lightspeed"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightspeed-postgres
+  namespace: openshell
+spec:
+  selector:
+    app: lightspeed-postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lightspeed-stack-config
+  namespace: openshell
+data:
+  lightspeed-stack.yaml: |
+    name: Lightspeed Core Stack (Kind)
+    service:
+      host: 0.0.0.0
+      port: 8080
+      base_url: http://localhost:8080
+      auth_enabled: false
+      workers: 1
+      color_log: true
+      access_log: true
+
+    llama_stack:
+      use_as_library_client: false
+      url: http://localhost:8321
+      allow_degraded_mode: true
+
+    user_data_collection:
+      feedback_enabled: false
+
+    database:
+      postgres:
+        host: lightspeed-postgres
+        port: 5432
+        db: lightspeed
+        user: lightspeed
+        password: "${env.POSTGRES_PASSWORD}"
+
+    conversation_cache:
+      type: "postgres"
+      postgres:
+        host: lightspeed-postgres
+        port: 5432
+        db: lightspeed
+        user: lightspeed
+        password: "${env.POSTGRES_PASSWORD}"
+
+    authentication:
+      module: "noop"
+
+    workflow_engine:
+      enabled: true
+      max_concurrent_workflows: 10
+      transcript_retention_days: 30
+
+    spawner:
+      type: openshell
+      openshell_gateway_url: "openshell-gateway:9080"
+      openshell_driver: podman
+      sandbox_image: "quay.io/jameswong/lightspeed-agentic-sandbox:latest"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lightspeed-stack
+  namespace: openshell
+  labels:
+    app: lightspeed-stack
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lightspeed-stack
+  template:
+    metadata:
+      labels:
+        app: lightspeed-stack
+    spec:
+      containers:
+        - name: lightspeed-stack
+          image: localhost/lightspeed-stack:kind-test-harness
+          imagePullPolicy: Never
+          args: ["-c", "/etc/lightspeed/lightspeed-stack.yaml"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lightspeed-stack-llm-secret
+                  key: OPENAI_API_KEY
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lightspeed-stack-secrets
+                  key: POSTGRES_PASSWORD
+          volumeMounts:
+            - name: config
+              mountPath: /etc/lightspeed/lightspeed-stack.yaml
+              subPath: lightspeed-stack.yaml
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      volumes:
+        - name: config
+          configMap:
+            name: lightspeed-stack-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lightspeed-stack
+  namespace: openshell
+spec:
+  selector:
+    app: lightspeed-stack
+  ports:
+    - port: 8080
+      targetPort: 8080
