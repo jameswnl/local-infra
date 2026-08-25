@@ -1,0 +1,21 @@
+# Kind cluster with host Podman socket mount for OpenShell gateway DooD
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: local-infra
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /run/user/501/podman/podman.sock
+        containerPath: /run/user/501/podman/podman.sock
+      - hostPath: /Users/jwong/ws/local-infra/kind/data/openshell
+        containerPath: /var/lib/openshell-data
+      - hostPath: /var/home/core/.local/share/containers/storage/volumes/openshell-certs/_data
+        containerPath: /var/lib/openshell-certs
+        readOnly: true
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 9080
+        protocol: TCP
+      - containerPort: 30081
+        hostPort: 9081
+        protocol: TCP

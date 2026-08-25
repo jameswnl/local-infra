@@ -1,13 +1,15 @@
-# OTel Collector + Jaeger — standalone observability stack.
+# Local dev infra — OTel Collector + Jaeger + OpenShell gateway (Podman).
 #
 # Usage:
 #   podman compose up -d
 #   open http://localhost:16686   # Jaeger UI
 #
 # Send traces to grpc://localhost:4317 or http://localhost:4318.
-# For cloud-agents, set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317.
 
 services:
+
+  # ---------- Observability ----------
+
   otel-collector:
     image: docker.io/otel/opentelemetry-collector-contrib:0.115.1
     volumes:
@@ -25,3 +27,50 @@ services:
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
       - "16686:16686"
+
+  # ---------- OpenShell Gateway ----------
+
+  gateway:
+    image: ghcr.io/nvidia/openshell/gateway:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+
+    # Clear default CMD so gateway.toml owns all settings.
+    command: []
+
+    user: "0"
+    security_opt:
+      - label=disable
+    userns_mode: keep-id:uid=0,gid=0
+
+    ports:
+      - "127.0.0.1:${OPENSHELL_PORT:-8080}:8080"
+      - "127.0.0.1:${OPENSHELL_HEALTH_PORT:-8081}:8081"
+
+    volumes:
+      # Podman socket — lets the gateway create and manage sandbox containers.
+      # Path is inside the Podman Machine VM, not the macOS host.
+      - ${PODMAN_SOCK:-/run/user/501/podman/podman.sock}:/run/podman/podman.sock
+
+      # Data directory — named volume.
+      - openshell-data:/var/lib/openshell
+
+      # JWT signing keys for sandbox auth.
+      - openshell-certs:/certs:ro
+
+      # TOML config.
+      - type: bind
+        source: ./gateway.toml
+        target: /etc/openshell/gateway.toml
+        read_only: true
+
+    environment:
+      OPENSHELL_GATEWAY_CONFIG: /etc/openshell/gateway.toml
+      OPENSHELL_PODMAN_SOCKET: /run/podman/podman.sock
+      OPENSHELL_DB_URL: "sqlite:/var/lib/openshell/gateway.db?mode=rwc"
+      XDG_DATA_HOME: /var/lib/openshell
+      HOME: /var/lib/openshell
+
+volumes:
+  openshell-data:
+  openshell-certs:
+    external: true

@@ -1,0 +1,28 @@
+# OpenShell gateway — Podman compute driver with JWT auth.
+#
+# Mounted read-only at /etc/openshell/gateway.toml inside the gateway container.
+
+[openshell]
+version = 1
+
+[openshell.gateway]
+bind_address        = "0.0.0.0:8080"
+health_bind_address = "0.0.0.0:8081"
+log_level           = "info"
+compute_drivers     = ["podman"]
+disable_tls         = true
+
+[openshell.gateway.gateway_jwt]
+signing_key_path = "/certs/jwt/signing.pem"
+public_key_path  = "/certs/jwt/public.pem"
+kid_path         = "/certs/jwt/kid"
+
+[openshell.gateway.auth]
+allow_unauthenticated_users = true
+
+[openshell.drivers.podman]
+socket_path       = "/run/podman/podman.sock"
+default_image     = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest"
+supervisor_image  = "ghcr.io/nvidia/openshell/supervisor:latest"
+image_pull_policy = "missing"
+grpc_endpoint     = "http://host.containers.internal:8080"
