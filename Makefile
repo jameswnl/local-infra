@@ -46,7 +46,7 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         ocp-prod-check ocp-prod-up ocp-prod-status ocp-prod-agent-sandbox-up \
         ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up \
         ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs \
-        ocp-prod-register
+        ocp-prod-register ocp-prod-quickstart
 
 # ---------- Podman Compose ----------
 
@@ -222,14 +222,26 @@ ocp-prod-keycloak-up:  ## Deploy a dev-grade Keycloak (not persistent) for testi
 	./ocp/install-dev-keycloak.sh
 
 ocp-prod-openshell-up: ocp-prod-check ocp-prod-up ocp-prod-agent-sandbox-up  ## Deploy OpenShell to OpenShift (production: real TLS + OIDC)
-	oc adm policy add-scc-to-user privileged -z openshell-sandbox -n $(OCP_PROD_PROJECT)
+	# SA name follows Helm's <release-name>-sandbox convention, not a fixed
+	# "openshell-sandbox" -- the eval target's hardcoded release name
+	# ("openshell") happens to match its own hardcoded SCC grant below, but
+	# OCP_PROD_RELEASE defaults to "openshell-prod", so this must track it.
+	oc adm policy add-scc-to-user privileged -z $(OCP_PROD_RELEASE)-sandbox -n $(OCP_PROD_PROJECT)
+	# certManager.serverDnsNames[0] drives the certificate's commonName, which
+	# X.509 caps at 64 bytes (RFC 5280) -- managed OpenShift's auto-generated
+	# apps domains are frequently already 50+ bytes, so a real hostname often
+	# doesn't fit. [0] is a short synthetic label used only for commonName;
+	# the real hostname goes in [1] as a SAN, which is what TLS clients
+	# actually validate against (RFC 6125) and is also what satisfies
+	# route.yaml's host-coverage check (it scans all serverDnsNames entries).
 	helm upgrade --install $(OCP_PROD_RELEASE) oci://ghcr.io/nvidia/openshell/helm-chart \
 		--version $(OCP_PROD_CHART_VERSION) \
 		--namespace $(OCP_PROD_PROJECT) \
 		-f ocp/values-prod.yaml \
 		--set certManager.serverIssuerRef.name=$(OCP_PROD_CLUSTER_ISSUER) \
 		--set certManager.serverIssuerRef.kind=$(OCP_PROD_ISSUER_KIND) \
-		--set certManager.serverDnsNames[0]=$(OCP_PROD_HOSTNAME) \
+		--set certManager.serverDnsNames[0]=$(OCP_PROD_RELEASE)-external \
+		--set certManager.serverDnsNames[1]=$(OCP_PROD_HOSTNAME) \
 		--set openshiftRoute.enabled=true \
 		--set openshiftRoute.host=$(OCP_PROD_HOSTNAME) \
 		--set server.oidc.issuer=$(OCP_PROD_OIDC_ISSUER) \
@@ -249,6 +261,28 @@ ocp-prod-openshell-logs:  ## Tail OpenShell gateway logs in production
 ocp-prod-register:  ## Register the production gateway with the OpenShell CLI over OIDC
 	openshell gateway add https://$(OCP_PROD_HOSTNAME) --name $(OCP_PROD_GATEWAY_NAME) --oidc-issuer $(OCP_PROD_OIDC_ISSUER)
 	openshell gateway login $(OCP_PROD_GATEWAY_NAME)
+
+ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up  ## One-shot prod deploy on a brand-new cluster: bootstraps self-signed CA + dev Keycloak, computes a hostname, deploys
+	@host="$(OCP_PROD_HOSTNAME)"; \
+	if [ -z "$$host" ]; then \
+		domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
+		if [ -z "$$domain" ]; then \
+			echo "error: could not read the cluster's default Ingress domain (ingresses.config.openshift.io/cluster)." >&2; \
+			echo "Set OCP_PROD_HOSTNAME explicitly instead, e.g.:" >&2; \
+			echo "  OCP_PROD_HOSTNAME=openshell.apps.mycluster.example.com make ocp-prod-quickstart" >&2; \
+			exit 1; \
+		fi; \
+		host="$(OCP_PROD_RELEASE)-$(OCP_PROD_PROJECT).$$domain"; \
+		echo "OCP_PROD_HOSTNAME not set -- using cluster default: $$host"; \
+	fi; \
+	issuer="$(OCP_PROD_OIDC_ISSUER)"; \
+	if [ -z "$$issuer" ]; then \
+		issuer="http://keycloak.keycloak.svc.cluster.local:9090/realms/openshell"; \
+	fi; \
+	$(MAKE) ocp-prod-openshell-up \
+		OCP_PROD_HOSTNAME="$$host" \
+		OCP_PROD_CLUSTER_ISSUER="$(OCP_PROD_SELFSIGNED_ISSUER_NAME)" \
+		OCP_PROD_OIDC_ISSUER="$$issuer"
 
 # ---------- Help ----------
 
