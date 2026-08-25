@@ -2,17 +2,27 @@
 #
 # Podman compose targets manage the local container stack.
 # Kind targets manage a Kubernetes cluster with services deployed as pods.
+# OCP targets deploy the real OpenShell Helm chart to an existing OpenShift
+# project via `oc` (assumes you're already logged in).
 
 KIND_CLUSTER    ?= local-infra
 KIND_KUBECONFIG ?= $(CURDIR)/kind/kubeconfig
 KUBECTL         := kubectl --kubeconfig $(KIND_KUBECONFIG)
+
+OCP_PROJECT       ?= openshell
+OCP_CHART_VERSION ?= 0.0.111
+OCP_GATEWAY_NAME  ?= ocp
+OCP_SANDBOX_IMAGE ?=
 
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
 .PHONY: up down logs logs-otel logs-openshell openshell-health jaeger status register help \
         up-openshell down-openshell \
         kind-up kind-down kind-status \
-        kind-openshell-up kind-openshell-down kind-openshell-logs kind-openshell-health kind-openshell-register
+        kind-openshell-up kind-openshell-down kind-openshell-logs kind-openshell-health kind-openshell-register \
+        ocp-up ocp-status ocp-agent-sandbox-up \
+        ocp-openshell-up ocp-openshell-down ocp-openshell-logs \
+        ocp-port-forward ocp-register
 
 # ---------- Podman Compose ----------
 
@@ -101,6 +111,48 @@ kind-openshell-health:  ## Check OpenShell health in Kind
 
 kind-openshell-register:  ## Register Kind OpenShell with CLI (one-time)
 	openshell gateway add http://localhost:9080 --name local-kind
+
+# ---------- OpenShift (oc) ----------
+#
+# Deploys the real OpenShell Helm chart (not raw manifests) using the
+# documented OpenShift eval path: SCC binding + TLS/auth disabled overrides
+# in ocp/values-eval.yaml. Requires an existing `oc login` session.
+# Sandbox pods run via the Agent Sandbox controller (Kubernetes compute
+# driver), unlike the Kind path above, which uses Podman DooD.
+
+ocp-up:  ## Create the OpenShift project if it doesn't already exist
+	@oc get project $(OCP_PROJECT) >/dev/null 2>&1 || oc new-project $(OCP_PROJECT)
+
+ocp-status:  ## Show all pods + sandboxes in the OpenShift project
+	@oc -n $(OCP_PROJECT) get pods
+	@oc -n $(OCP_PROJECT) get sandboxes.agents.x-k8s.io 2>/dev/null || true
+
+ocp-agent-sandbox-up:  ## Install the Agent Sandbox controller/CRDs (cluster-scoped, idempotent)
+	./ocp/install-agent-sandbox.sh
+
+ocp-openshell-up: ocp-up ocp-agent-sandbox-up  ## Deploy OpenShell to OpenShift (eval: TLS + auth disabled)
+	oc adm policy add-scc-to-user privileged -z openshell-sandbox -n $(OCP_PROJECT)
+	helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart \
+		--version $(OCP_CHART_VERSION) \
+		--namespace $(OCP_PROJECT) \
+		-f ocp/values-eval.yaml \
+		$(if $(OCP_SANDBOX_IMAGE),--set server.sandboxImage=$(OCP_SANDBOX_IMAGE),)
+	oc -n $(OCP_PROJECT) rollout status statefulset/openshell --timeout=180s
+	@echo ""
+	@echo "Forward the gateway:  make ocp-port-forward"
+	@echo "Register (one-time):  make ocp-register"
+
+ocp-openshell-down:  ## Uninstall the OpenShell release from OpenShift
+	helm uninstall openshell -n $(OCP_PROJECT) --ignore-not-found
+
+ocp-openshell-logs:  ## Tail OpenShell gateway logs on OpenShift
+	oc -n $(OCP_PROJECT) logs -f statefulset/openshell
+
+ocp-port-forward:  ## Port-forward the OpenShift gateway to localhost:8080 (foreground)
+	oc -n $(OCP_PROJECT) port-forward svc/openshell 8080:8080
+
+ocp-register:  ## Register the OpenShift gateway with the OpenShell CLI (one-time)
+	openshell gateway add http://127.0.0.1:8080 --local --name $(OCP_GATEWAY_NAME)
 
 # ---------- Help ----------
 

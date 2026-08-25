@@ -1,0 +1,24 @@
+# OpenShift evaluation overrides for the OpenShell Helm chart.
+#
+# TLS is disabled and unauthenticated CLI access is enabled — this is only
+# safe on a private/eval cluster reached through `oc port-forward`. For a
+# real deployment (cert-manager + Route + OIDC), see
+# docs/kubernetes/openshift.mdx in the OpenShell repo instead of this file.
+
+server:
+  # Plaintext HTTP — avoids provisioning a server cert for evaluation.
+  disableTls: true
+  auth:
+    # UNSAFE outside of trusted local/eval use: accepts any request as a
+    # local developer principal. Required here because disableTls=true
+    # alone does not configure any auth mechanism (no mTLS, no OIDC), so
+    # the gateway would otherwise reject every CLI request.
+    allowUnauthenticatedUsers: true
+
+# OpenShift's SCC admission assigns UID/fsGroup itself; the chart's
+# hardcoded defaults conflict with that, so clear them.
+podSecurityContext:
+  fsGroup: null
+
+securityContext:
+  runAsUser: null
