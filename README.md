@@ -8,7 +8,7 @@ from a local Podman stack up to a production-shaped OpenShift deployment.
 | Environment | What it's for | Sandboxes run via | Get started |
 |---|---|---|---|
 | [Podman](#podman) | Fastest local loop | Podman socket (DooD) | `make up` |
-| [Kind](#kind-local-kubernetes) | Testing the Kubernetes compute driver locally | Podman socket (DooD) | `make kind-up` |
+| [Kind](#kind-local-kubernetes) | Testing the Kubernetes compute driver locally | Agent Sandbox controller | `make kind-up` |
 | [OpenShift — Eval](#openshift--eval) | Quick test against a real OCP cluster | Agent Sandbox controller | `make ocp-openshell-up` |
 | [OpenShift — Production](#openshift--production) | Real TLS + OIDC on OCP | Agent Sandbox controller | `make ocp-prod-openshell-up` |
 
@@ -74,20 +74,33 @@ openshell CLI ──▶ gateway (:8080, Podman driver)
 
 ## Kind (local Kubernetes)
 
-A local Kind cluster with the gateway deployed as a plain Deployment (raw
-manifests, not the Helm chart). Sandboxes still run via Podman DooD — the
-host's Podman socket is mounted into the Kind node — so this exercises
-Kubernetes deployment mechanics without depending on the Agent Sandbox
-controller used by the OpenShift paths below.
+A local Kind cluster with the real OpenShell Helm chart deployed, same as
+the OpenShift paths below. Sandboxes run via the Agent Sandbox controller
+(Kubernetes compute driver) — this is the canonical local stand-in for a
+real K8s/OCP deployment, not just a Kubernetes-deployment-mechanics
+smoke test.
 
 ```bash
-make kind-up                    # create the Kind cluster
-make kind-openshell-up          # deploy the gateway
-make kind-openshell-register    # register with the CLI (one-time)
-make kind-openshell-health      # check gateway health
-make kind-status                # all pods in the cluster
-make kind-down                  # delete the cluster
+make kind-up                      # create the Kind cluster
+make kind-openshell-up            # install the Agent Sandbox CRD/controller + deploy the gateway
+make kind-openshell-register      # register with the CLI (one-time; needs port-forward running)
+make kind-openshell-port-forward  # forward the gateway to localhost:9090 (foreground)
+make kind-openshell-test-spawn    # real spawn test via the kubernetes driver (needs cloud_agents + openshell installed)
+make kind-status                  # all pods + sandboxes in the cluster
+make kind-down                    # delete the cluster
 ```
+
+Gateway: `http://127.0.0.1:9090` (once `kind-openshell-port-forward` is running).
+
+### Legacy: Podman DooD on Kind
+
+An older path (`make kind-openshell-podman-up`) deploys the gateway as a
+plain Deployment (raw manifests) with sandboxes running via Podman DooD —
+the host's Podman socket mounted into the Kind node — instead of the Agent
+Sandbox controller. Kept for reference/comparison only; not a supported
+deployment target (Kind counts as a Kubernetes target, which uses the
+kubernetes compute driver exclusively). See
+`make kind-openshell-podman-up/-down/-logs/-health/-register`.
 
 Gateway: `http://localhost:9080` · Health: `http://localhost:9081/healthz`
 

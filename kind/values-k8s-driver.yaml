@@ -1,0 +1,17 @@
+# OpenShell Helm chart overrides for the canonical Kind deployment path
+# (kind-openshell-up): kubernetes compute driver via the Agent Sandbox
+# controller, TLS/auth disabled for local testing.
+#
+# Deliberately does NOT null podSecurityContext.fsGroup/securityContext.
+# runAsUser the way ocp/values-eval.yaml does -- that override exists only
+# because OpenShift's SCC admission assigns UID/fsGroup itself and conflicts
+# with the chart's hardcoded defaults. Plain Kubernetes (Kind) has no SCC
+# admission, so nulling those breaks the gateway: its own JWT-signing-key
+# Secret is mounted at mode 0400, and only the chart's default
+# fsGroup:1000/runAsUser:1000 pairing makes it group-readable by the
+# container. Keep the chart defaults on Kind.
+
+server:
+  disableTls: true
+  auth:
+    allowUnauthenticatedUsers: true

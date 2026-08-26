@@ -2,12 +2,22 @@
 #
 # Podman compose targets manage the local container stack.
 # Kind targets manage a Kubernetes cluster with services deployed as pods.
+# The canonical Kind OpenShell path (`kind-openshell-up`) uses the real
+# Helm chart + Agent Sandbox controller (Kubernetes compute driver) --
+# matching the architecture rule that all K8s/OCP/Kind deployments use the
+# kubernetes driver, Podman deployments use the podman driver, no other
+# combination. The old Podman-DooD Kind path is kept as `kind-openshell-
+# podman-up` for reference/comparison, not as a supported deployment target.
 # OCP targets deploy the real OpenShell Helm chart to an existing OpenShift
 # project via `oc` (assumes you're already logged in).
 
-KIND_CLUSTER    ?= local-infra
-KIND_KUBECONFIG ?= $(CURDIR)/kind/kubeconfig
-KUBECTL         := kubectl --kubeconfig $(KIND_KUBECONFIG)
+KIND_CLUSTER          ?= local-infra
+KIND_KUBECONFIG       ?= $(CURDIR)/kind/kubeconfig
+KUBECTL               := kubectl --kubeconfig $(KIND_KUBECONFIG)
+KIND_CHART_VERSION    ?= 0.0.111
+KIND_OPENSHELL_NS     ?= openshell-k8s
+KIND_OPENSHELL_PORT   ?= 9090
+KIND_GATEWAY_NAME     ?= local-kind
 
 OCP_PROJECT       ?= openshell
 OCP_CHART_VERSION ?= 0.0.111
@@ -38,8 +48,11 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
 
 .PHONY: up down logs logs-otel logs-openshell openshell-health jaeger status register help \
         up-openshell down-openshell \
-        kind-up kind-down kind-status \
-        kind-openshell-up kind-openshell-down kind-openshell-logs kind-openshell-health kind-openshell-register \
+        kind-up kind-down kind-status kind-agent-sandbox-up \
+        kind-openshell-up kind-openshell-down kind-openshell-logs \
+        kind-openshell-port-forward kind-openshell-register kind-openshell-test-spawn \
+        kind-openshell-podman-up kind-openshell-podman-down kind-openshell-podman-logs \
+        kind-openshell-podman-health kind-openshell-podman-register \
         ocp-up ocp-status ocp-agent-sandbox-up \
         ocp-openshell-up ocp-openshell-down ocp-openshell-logs \
         ocp-port-forward ocp-register ocp-test-eacces-repro \
@@ -109,32 +122,94 @@ kind-down:  ## Delete Kind cluster
 	kind delete cluster --name $(KIND_CLUSTER)
 	@rm -f $(KIND_KUBECONFIG)
 
-kind-status:  ## Show all pods in Kind cluster
+kind-status:  ## Show all pods + sandboxes in Kind cluster
 	@$(KUBECTL) get pods -A
+	@$(KUBECTL) get sandboxes.agents.x-k8s.io -A 2>/dev/null || true
 
-# ---------- Kind: OpenShell ----------
+kind-agent-sandbox-up:  ## Install the Agent Sandbox controller/CRDs into Kind (cluster-scoped, idempotent)
+	KUBECONFIG=$(KIND_KUBECONFIG) ./ocp/install-agent-sandbox.sh
 
-kind-openshell-up: kind-up  ## Deploy OpenShell to Kind
-	@echo "[kind] Deploying OpenShell..."
+# ---------- Kind: OpenShell (canonical -- Kubernetes compute driver) ----------
+#
+# Deploys the real OpenShell Helm chart (not raw manifests), same as the OCP
+# eval path below, with TLS/auth disabled for local testing. Sandbox pods run
+# via the Agent Sandbox controller, exactly like OCP/production -- this is
+# what makes it a meaningful local stand-in for the real deployment target,
+# unlike the Podman-DooD legacy path (kind-openshell-podman-up).
+#
+# Deliberately does NOT reuse ocp/values-eval.yaml wholesale: that file also
+# nulls podSecurityContext.fsGroup/securityContext.runAsUser, which is an
+# OpenShift-SCC-specific workaround. On plain Kubernetes (Kind), nulling
+# those breaks the gateway's own JWT-signing-key Secret mount (mode 0400) --
+# the chart's own fsGroup:1000/runAsUser:1000 defaults are what make it
+# group-readable, so Kind must keep them.
+
+kind-openshell-up: kind-up kind-agent-sandbox-up  ## Deploy OpenShell to Kind (kubernetes driver, canonical)
+	@echo "[kind] Deploying OpenShell (kubernetes driver)..."
+	@$(KUBECTL) create namespace $(KIND_OPENSHELL_NS) --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	helm upgrade --install openshell-k8s oci://ghcr.io/nvidia/openshell/helm-chart \
+		--version $(KIND_CHART_VERSION) \
+		--namespace $(KIND_OPENSHELL_NS) \
+		-f kind/values-k8s-driver.yaml \
+		--kubeconfig $(KIND_KUBECONFIG)
+	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) rollout status statefulset/openshell-k8s --timeout=180s
+	@echo ""
+	@echo "Forward the gateway:  make kind-openshell-port-forward"
+	@echo "Register (one-time):  make kind-openshell-register"
+	@echo "Test a real spawn:    make kind-openshell-test-spawn"
+
+kind-openshell-down:  ## Uninstall OpenShell from Kind
+	helm uninstall openshell-k8s -n $(KIND_OPENSHELL_NS) --kubeconfig $(KIND_KUBECONFIG) --ignore-not-found
+
+kind-openshell-logs:  ## Tail OpenShell gateway logs in Kind
+	$(KUBECTL) -n $(KIND_OPENSHELL_NS) logs -f statefulset/openshell-k8s
+
+kind-openshell-port-forward:  ## Port-forward the Kind OpenShell gateway to localhost (foreground)
+	$(KUBECTL) -n $(KIND_OPENSHELL_NS) port-forward svc/openshell-k8s $(KIND_OPENSHELL_PORT):8080
+
+kind-openshell-register:  ## Register the Kind OpenShell gateway with the CLI (one-time; requires port-forward running)
+	openshell gateway add http://127.0.0.1:$(KIND_OPENSHELL_PORT) --local --name $(KIND_GATEWAY_NAME)
+
+kind-openshell-test-spawn:  ## Run a real spawn test via the kubernetes driver (requires cloud_agents + openshell installed)
+	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) port-forward svc/openshell-k8s $(KIND_OPENSHELL_PORT):8080 \
+		>/tmp/kind-openshell-port-forward.log 2>&1 & \
+	PF_PID=$$!; \
+	sleep 2; \
+	OPENSHELL_GATEWAY_URL=localhost:$(KIND_OPENSHELL_PORT) python3 kind/test-k8s-driver-spawn.py; \
+	STATUS=$$?; \
+	kill $$PF_PID 2>/dev/null; \
+	exit $$STATUS
+
+# ---------- Kind: OpenShell (legacy -- Podman DooD) ----------
+#
+# Reference/comparison path only: sandboxes run via the Podman compute
+# driver against the host's Podman socket mounted into the Kind node
+# (Docker-out-of-Docker style). Not a supported deployment target under the
+# OpenShellSpawner-only architecture (Kind counts as a Kubernetes target,
+# which uses the kubernetes driver exclusively) -- kept for debugging/
+# comparison against kind-openshell-up above.
+
+kind-openshell-podman-up: kind-up  ## Deploy OpenShell to Kind via Podman DooD (legacy, not a supported target)
+	@echo "[kind] Deploying OpenShell (podman driver, legacy)..."
 	@$(KUBECTL) apply -f kind/openshell-gateway.yaml
 	@$(KUBECTL) -n openshell rollout status deployment/openshell-gateway --timeout=120s
 	@echo ""
 	@echo "OpenShell: http://localhost:9080"
 	@echo "Health:    http://localhost:9081/healthz"
 	@echo ""
-	@echo "Register (one-time):  make kind-openshell-register"
+	@echo "Register (one-time):  make kind-openshell-podman-register"
 
-kind-openshell-down:  ## Remove OpenShell from Kind
+kind-openshell-podman-down:  ## Remove the legacy Podman-DooD OpenShell deployment from Kind
 	$(KUBECTL) delete -f kind/openshell-gateway.yaml --ignore-not-found
 
-kind-openshell-logs:  ## Tail OpenShell logs in Kind
+kind-openshell-podman-logs:  ## Tail logs for the legacy Podman-DooD OpenShell deployment
 	$(KUBECTL) -n openshell logs -f deployment/openshell-gateway
 
-kind-openshell-health:  ## Check OpenShell health in Kind
+kind-openshell-podman-health:  ## Check health of the legacy Podman-DooD OpenShell deployment
 	@curl -sf http://localhost:9081/healthz && echo " OK" || echo " UNHEALTHY"
 
-kind-openshell-register:  ## Register Kind OpenShell with CLI (one-time)
-	openshell gateway add http://localhost:9080 --name local-kind
+kind-openshell-podman-register:  ## Register the legacy Podman-DooD Kind OpenShell gateway with the CLI (one-time)
+	openshell gateway add http://localhost:9080 --name local-kind-podman
 
 # ---------- OpenShift (oc) ----------
 #
@@ -142,7 +217,9 @@ kind-openshell-register:  ## Register Kind OpenShell with CLI (one-time)
 # documented OpenShift eval path: SCC binding + TLS/auth disabled overrides
 # in ocp/values-eval.yaml. Requires an existing `oc login` session.
 # Sandbox pods run via the Agent Sandbox controller (Kubernetes compute
-# driver), unlike the Kind path above, which uses Podman DooD.
+# driver) -- same driver as the canonical kind-openshell-up path above,
+# just with OpenShift-specific SCC handling instead of Kind's plain fsGroup/
+# runAsUser defaults.
 
 ocp-up:  ## Create the OpenShift project if it doesn't already exist
 	@oc get project $(OCP_PROJECT) >/dev/null 2>&1 || oc new-project $(OCP_PROJECT)
