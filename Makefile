@@ -53,9 +53,9 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         kind-openshell-port-forward kind-openshell-register kind-openshell-test-spawn \
         kind-openshell-podman-up kind-openshell-podman-down kind-openshell-podman-logs \
         kind-openshell-podman-health kind-openshell-podman-register \
-        ocp-up ocp-status ocp-agent-sandbox-up \
-        ocp-openshell-up ocp-openshell-down ocp-openshell-logs \
-        ocp-port-forward ocp-register ocp-test-eacces-repro \
+        ocp-eval-up ocp-eval-status ocp-eval-agent-sandbox-up \
+        ocp-eval-openshell-up ocp-eval-openshell-down ocp-eval-openshell-logs \
+        ocp-eval-port-forward ocp-eval-register ocp-eval-test-eacces-repro \
         ocp-prod-check ocp-prod-up ocp-prod-status ocp-prod-agent-sandbox-up \
         ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up \
         ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs \
@@ -122,7 +122,11 @@ kind-down:  ## Delete Kind cluster
 	kind delete cluster --name $(KIND_CLUSTER)
 	@rm -f $(KIND_KUBECONFIG)
 
-kind-status:  ## Show all pods + sandboxes in Kind cluster
+kind-status:  ## Show Kind clusters, plus all pods + sandboxes in KIND_CLUSTER
+	@echo "Kind clusters:"
+	@kind get clusters 2>/dev/null | sed 's/^/  /'
+	@echo ""
+	@echo "Pods + sandboxes in '$(KIND_CLUSTER)':"
 	@$(KUBECTL) get pods -A
 	@$(KUBECTL) get sandboxes.agents.x-k8s.io -A 2>/dev/null || true
 
@@ -168,7 +172,10 @@ kind-openshell-port-forward:  ## Port-forward the Kind OpenShell gateway to loca
 	$(KUBECTL) -n $(KIND_OPENSHELL_NS) port-forward svc/openshell-k8s $(KIND_OPENSHELL_PORT):8080
 
 kind-openshell-register:  ## Register the Kind OpenShell gateway with the CLI (one-time; requires port-forward running)
-	openshell gateway add http://127.0.0.1:$(KIND_OPENSHELL_PORT) --local --name $(KIND_GATEWAY_NAME)
+	# No --local: that flag extracts mTLS certs from a Docker container, but
+	# kind/values-k8s-driver.yaml runs with disableTls/allowUnauthenticatedUsers,
+	# and the gateway is a K8s pod, not a host Docker container.
+	openshell gateway add http://127.0.0.1:$(KIND_OPENSHELL_PORT) --name $(KIND_GATEWAY_NAME)
 
 kind-openshell-test-spawn:  ## Run a real spawn test via the kubernetes driver (requires cloud_agents + openshell installed)
 	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) port-forward svc/openshell-k8s $(KIND_OPENSHELL_PORT):8080 \
@@ -221,17 +228,17 @@ kind-openshell-podman-register:  ## Register the legacy Podman-DooD Kind OpenShe
 # just with OpenShift-specific SCC handling instead of Kind's plain fsGroup/
 # runAsUser defaults.
 
-ocp-up:  ## Create the OpenShift project if it doesn't already exist
+ocp-eval-up:  ## Create the OpenShift project if it doesn't already exist
 	@oc get project $(OCP_PROJECT) >/dev/null 2>&1 || oc new-project $(OCP_PROJECT)
 
-ocp-status:  ## Show all pods + sandboxes in the OpenShift project
+ocp-eval-status:  ## Show all pods + sandboxes in the OpenShift project
 	@oc -n $(OCP_PROJECT) get pods
 	@oc -n $(OCP_PROJECT) get sandboxes.agents.x-k8s.io 2>/dev/null || true
 
-ocp-agent-sandbox-up:  ## Install the Agent Sandbox controller/CRDs (cluster-scoped, idempotent)
+ocp-eval-agent-sandbox-up:  ## Install the Agent Sandbox controller/CRDs (cluster-scoped, idempotent)
 	./ocp/install-agent-sandbox.sh
 
-ocp-openshell-up: ocp-up ocp-agent-sandbox-up  ## Deploy OpenShell to OpenShift (eval: TLS + auth disabled)
+ocp-eval-openshell-up: ocp-eval-up ocp-eval-agent-sandbox-up  ## Deploy OpenShell to OpenShift (eval: TLS + auth disabled)
 	oc adm policy add-scc-to-user privileged -z openshell-sandbox -n $(OCP_PROJECT)
 	helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart \
 		--version $(OCP_CHART_VERSION) \
@@ -240,22 +247,25 @@ ocp-openshell-up: ocp-up ocp-agent-sandbox-up  ## Deploy OpenShell to OpenShift 
 		$(if $(OCP_SANDBOX_IMAGE),--set server.sandboxImage=$(OCP_SANDBOX_IMAGE),)
 	oc -n $(OCP_PROJECT) rollout status statefulset/openshell --timeout=180s
 	@echo ""
-	@echo "Forward the gateway:  make ocp-port-forward"
-	@echo "Register (one-time):  make ocp-register"
+	@echo "Forward the gateway:  make ocp-eval-port-forward"
+	@echo "Register (one-time):  make ocp-eval-register"
 
-ocp-openshell-down:  ## Uninstall the OpenShell release from OpenShift
+ocp-eval-openshell-down:  ## Uninstall the OpenShell release from OpenShift
 	helm uninstall openshell -n $(OCP_PROJECT) --ignore-not-found
 
-ocp-openshell-logs:  ## Tail OpenShell gateway logs on OpenShift
+ocp-eval-openshell-logs:  ## Tail OpenShell gateway logs on OpenShift
 	oc -n $(OCP_PROJECT) logs -f statefulset/openshell
 
-ocp-port-forward:  ## Port-forward the OpenShift gateway to localhost:8080 (foreground)
+ocp-eval-port-forward:  ## Port-forward the OpenShift gateway to localhost:8080 (foreground)
 	oc -n $(OCP_PROJECT) port-forward svc/openshell 8080:8080
 
-ocp-register:  ## Register the OpenShift gateway with the OpenShell CLI (one-time)
-	openshell gateway add http://127.0.0.1:8080 --local --name $(OCP_GATEWAY_NAME)
+ocp-eval-register:  ## Register the OpenShift gateway with the OpenShell CLI (one-time)
+	# No --local: that flag extracts mTLS certs from a Docker container, but
+	# ocp/values-eval.yaml runs with disableTls/allowUnauthenticatedUsers, and
+	# the gateway is an OpenShift pod, not a host Docker container.
+	openshell gateway add http://127.0.0.1:8080 --name $(OCP_GATEWAY_NAME)
 
-ocp-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-register first)
+ocp-eval-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-eval-register first)
 	./ocp/test-eacces-repro.sh $(OCP_GATEWAY_NAME) $(OCP_PROJECT) $(OCP_SANDBOX_IMAGE)
 
 # ---------- OpenShift (oc) — Production ----------

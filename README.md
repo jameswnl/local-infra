@@ -9,7 +9,7 @@ from a local Podman stack up to a production-shaped OpenShift deployment.
 |---|---|---|---|
 | [Podman](#podman) | Fastest local loop | Podman socket (DooD) | `make up` |
 | [Kind](#kind-local-kubernetes) | Testing the Kubernetes compute driver locally | Agent Sandbox controller | `make kind-up` |
-| [OpenShift — Eval](#openshift--eval) | Quick test against a real OCP cluster | Agent Sandbox controller | `make ocp-openshell-up` |
+| [OpenShift — Eval](#openshift--eval) | Quick test against a real OCP cluster | Agent Sandbox controller | `make ocp-eval-openshell-up` |
 | [OpenShift — Production](#openshift--production) | Real TLS + OIDC on OCP | Agent Sandbox controller | `make ocp-prod-openshell-up` |
 
 Run `make help` for the full target list at any time.
@@ -117,11 +117,11 @@ on a private cluster; never expose this externally. For a real deployment,
 see [OpenShift — Production](#openshift--production).
 
 ```bash
-make ocp-openshell-up      # install Agent Sandbox, grant SCC, helm install
-make ocp-port-forward      # foreground: localhost:8080 -> gateway
-make ocp-register          # register with the CLI (one-time, separate terminal)
-make ocp-status            # gateway + sandbox pods
-make ocp-openshell-down    # uninstall the release
+make ocp-eval-openshell-up      # install Agent Sandbox, grant SCC, helm install
+make ocp-eval-port-forward      # foreground: localhost:8080 -> gateway
+make ocp-eval-register          # register with the CLI (one-time, separate terminal)
+make ocp-eval-status            # gateway + sandbox pods
+make ocp-eval-openshell-down    # uninstall the release
 ```
 
 ### Variables
@@ -134,23 +134,23 @@ make ocp-openshell-down    # uninstall the release
 | `OCP_SANDBOX_IMAGE` | *(chart default)* | Default sandbox image — see below |
 
 ```bash
-OCP_PROJECT=lcore OCP_CHART_VERSION=0.0.111 make ocp-openshell-up
+OCP_PROJECT=lcore OCP_CHART_VERSION=0.0.111 make ocp-eval-openshell-up
 
 # Use a custom sandbox image (e.g. one pushed to quay.io) instead of the
 # chart default (ghcr.io/nvidia/openshell-community/sandboxes/base:latest):
-OCP_PROJECT=lcore OCP_SANDBOX_IMAGE=quay.io/jameswong/lightspeed-agentic-sandbox:latest-amd64 make ocp-openshell-up
+OCP_PROJECT=lcore OCP_SANDBOX_IMAGE=quay.io/jameswong/lightspeed-agentic-sandbox:latest-amd64 make ocp-eval-openshell-up
 ```
 
 `OCP_SANDBOX_IMAGE` sets `server.sandboxImage`. If the image lives in a
 private registry, also set `server.sandboxImagePullSecrets` (not currently
 plumbed through this Makefile — pass it via a second `-f`/`--set` on top of
-`ocp-openshell-up`'s helm invocation, or make the repository public as this
-setup does).
+`ocp-eval-openshell-up`'s helm invocation, or make the repository public as
+this setup does).
 
 ### Diagnostics
 
 ```bash
-make ocp-test-eacces-repro   # requires ocp-register first
+make ocp-eval-test-eacces-repro   # requires ocp-eval-register first
 ```
 
 Tests for a real, unresolved OCP `kubernetes`-driver bug — see
@@ -175,13 +175,16 @@ the sandbox. Same script backs `ocp-prod-test-eacces-repro` below.
   podman build --platform linux/amd64 -f Containerfile -t quay.io/jameswong/<image>:latest-amd64 .
   podman push quay.io/jameswong/<image>:latest-amd64
   ```
-- **CLI version.** `make ocp-register` requires a CLI build recent enough
-  to detect `http://` + `--local` as a plaintext gateway rather than trying
-  to pull mTLS certs from a Docker container. If it fails with a Docker
-  socket error, build the CLI from the OpenShell repo (`cargo build -p
-  openshell-cli`) instead of using an older installed binary.
+- **No `--local` on `gateway add`.** `--local` tells the CLI to extract
+  mTLS certs from a gateway running in Docker on this machine — not
+  applicable here, since the gateway is an OpenShift pod and
+  `ocp/values-eval.yaml` disables TLS entirely. `make ocp-eval-register`
+  registers it as a plain HTTP "cloud" gateway instead; the CLI will still
+  try a browser OAuth flow and time out after ~120s since the server
+  accepts unauthenticated requests, but the gateway is registered and
+  usable regardless (`Authentication skipped` is expected, not an error).
 - **Agent Sandbox is a shared, cluster-scoped dependency.**
-  `ocp/install-agent-sandbox.sh` installs it and `ocp-openshell-down`
+  `ocp/install-agent-sandbox.sh` installs it and `ocp-eval-openshell-down`
   intentionally leaves it in place (other projects on the cluster may
   depend on it). The script resolves whatever asset name the latest
   upstream release actually publishes, since that asset has been renamed
