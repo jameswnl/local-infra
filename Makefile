@@ -57,7 +57,8 @@ OCP_PROD_SELFSIGNED_CA_SECRET   ?= openshell-selfsigned-ca-tls
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
 .PHONY: up down logs logs-otel logs-openshell openshell-health jaeger status register help \
-        up-openshell down-openshell \
+        up-openshell down-openshell obs-up obs-down up-obs down-obs otel-up jaeger-up logs-obs \
+        observability-up observability-down up-observability down-observability logs-observability \
         kind-up kind-down kind-status kind-agent-sandbox-up \
         kind-openshell-up kind-openshell-down kind-openshell-logs \
         kind-openshell-port-forward kind-openshell-register kind-openshell-test-spawn \
@@ -116,6 +117,36 @@ status:  ## Show running containers
 
 register:  ## Register OpenShell with CLI (one-time)
 	openshell gateway add http://localhost:8080 --name local-podman
+
+# ---------- Observability (OTel Collector + Jaeger/Jaeger UI) ----------
+
+obs-up:  ## Start observability stack (OTel Collector + Jaeger/Jaeger UI) in Podman
+	podman compose up -d otel-collector jaeger
+	@echo ""
+	@echo "OTel Collector gRPC: grpc://localhost:4317"
+	@echo "OTel Collector HTTP: http://localhost:4318"
+	@echo "Jaeger UI:           http://localhost:16686"
+	@echo ""
+
+obs-down:  ## Stop observability stack (OTel Collector + Jaeger)
+	podman compose stop otel-collector jaeger 2>/dev/null || podman compose down otel-collector jaeger 2>/dev/null || true
+	@podman compose rm -f otel-collector jaeger 2>/dev/null || true
+
+logs-obs:  ## Tail observability logs (OTel + Jaeger)
+	podman compose logs -f otel-collector jaeger
+
+# Aliases for discoverability
+up-obs: obs-up
+otel-up: obs-up
+jaeger-up: obs-up
+down-obs: obs-down
+
+# Deprecated long-form aliases (kept for compatibility)
+observability-up: obs-up
+observability-down: obs-down
+logs-observability: logs-obs
+up-observability: obs-up
+down-observability: obs-down
 
 # ---------- Kind: Cluster ----------
 
