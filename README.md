@@ -104,6 +104,29 @@ kubernetes compute driver exclusively). See
 
 Gateway: `http://localhost:9080` · Health: `http://localhost:9081/healthz`
 
+### lightspeed-stack on Kind
+
+Deploys lightspeed-stack + Postgres alongside the gateway above, wired via
+in-cluster Service DNS. Needs the harness-only image (the official product
+image has no `cloud_agents` dependency), built from `~/ws/lightspeed-stack`
++ `~/ws/lightspeed-cloud-agents`:
+
+```bash
+make kind-lightspeed-up    # build the harness image from clean main + deploy/restart it
+```
+
+`kind-lightspeed-up` chains `kind-lightspeed-build` (build + `kind load`)
+and `kind-lightspeed-apply` (`kubectl apply` + rollout restart). The build
+step refuses to run unless both source repos are on a clean, up-to-date
+`origin/main` checkout — see [Image freshness](#image-freshness) below.
+
+One-time secret before the pod will actually start:
+
+```bash
+kubectl --kubeconfig kind/kubeconfig -n openshell-k8s create secret \
+  generic lightspeed-stack-llm-secret --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
+```
+
 ## OpenShift — Eval
 
 Deploys the real OpenShell Helm chart to an existing OpenShift project via
@@ -147,6 +170,10 @@ plumbed through this Makefile — pass it via a second `-f`/`--set` on top of
 `ocp-eval-openshell-up`'s helm invocation, or make the repository public as
 this setup does).
 
+Build the sandbox image from clean main with `make ocp-sandbox-build` (see
+[Image freshness](#image-freshness)) — it prints an immutable `<image>:<sha>`
+ref to pass as `OCP_SANDBOX_IMAGE`.
+
 ### Diagnostics
 
 ```bash
@@ -169,12 +196,9 @@ the sandbox. Same script backs `ocp-prod-test-eacces-repro` below.
 - **Sandbox image architecture.** `podman build` on Apple Silicon produces
   an arm64 image by default; OCP cluster nodes are typically amd64, and the
   sandbox init container fails with `exec container process: Exec format
-  error` if the image doesn't match the node arch. Build and push with an
-  explicit platform:
-  ```bash
-  podman build --platform linux/amd64 -f Containerfile -t quay.io/jameswong/<image>:latest-amd64 .
-  podman push quay.io/jameswong/<image>:latest-amd64
-  ```
+  error` if the image doesn't match the node arch. `make ocp-sandbox-build`
+  (see [Image freshness](#image-freshness)) always builds `--platform
+  linux/amd64` for exactly this reason.
 - **No `--local` on `gateway add`.** `--local` tells the CLI to extract
   mTLS certs from a gateway running in Docker on this machine — not
   applicable here, since the gateway is an OpenShift pod and
@@ -208,10 +232,11 @@ make ocp-prod-quickstart
 
 One command: installs cert-manager, bootstraps a self-signed ClusterIssuer,
 deploys a dev-grade Keycloak, computes a hostname from the cluster's default
-Ingress domain (`ingresses.config.openshift.io/cluster`), and deploys the
-gateway. Idempotent — every step it chains is safe to re-run. Verified
-end-to-end on two separate live OCP clusters, including one where the
-auto-generated apps domain was long enough to trip the certificate
+Ingress domain (`ingresses.config.openshift.io/cluster`), deploys the
+gateway, and registers it with the CLI (`ocp-prod-register`) using the same
+computed hostname/issuer. Idempotent — every step it chains is safe to
+re-run. Verified end-to-end on two separate live OCP clusters, including one
+where the auto-generated apps domain was long enough to trip the certificate
 `commonName` 64-byte limit (see Gotchas).
 
 Override any piece once you have real infrastructure — e.g. a real hostname
@@ -261,6 +286,20 @@ make ocp-prod-register        # openshell gateway add <hostname> --oidc-issuer .
 make ocp-prod-test-eacces-repro  # see Diagnostics under Eval above
 make ocp-prod-openshell-down
 ```
+
+### lightspeed-stack on production OCP
+
+```bash
+make ocp-prod-lightspeed-up    # build the harness image from clean main + deploy/restart it
+```
+
+Same shape as [lightspeed-stack on Kind](#lightspeed-stack-on-kind): builds
+from `~/ws/lightspeed-stack` + `~/ws/lightspeed-cloud-agents` (both must be
+on a clean `origin/main` — see [Image freshness](#image-freshness)), pushes
+under the fixed `ocp-harness` tag, and applies `ocp/lightspeed-stack.yaml`.
+That manifest sets `imagePullPolicy: Always` specifically so a same-tag push
+is always re-pulled on rollout restart. See the manifest's header comment
+for the LLM/OIDC-token secrets it needs — not automated here.
 
 I've run this exact sequence end-to-end against a real OCP cluster
 (self-signed issuer + dev Keycloak): the gateway comes up with `TLS
@@ -332,6 +371,34 @@ have one.
   obtained via a local port-forward and tokens validated by the in-cluster
   gateway carry an identical `iss`. If you change `KEYCLOAK_SETUP_PORT`,
   re-verify token issuers still match before trusting the deployment.
+
+## Image freshness
+
+`kind-lightspeed-build`, `ocp-prod-lightspeed-build`, and `ocp-sandbox-build`
+all build from local checkouts of separate source repos
+(`~/ws/lightspeed-stack`, `~/ws/lightspeed-cloud-agents`,
+`~/ws/lightspeed-agentic-sandbox`) rather than this repo. Before building,
+each one runs `scripts/check-clean-main.sh <repo>` against every source repo
+involved, which **fails the build** unless that repo's checked-out `HEAD`
+matches `origin/main` exactly and the working tree is clean — otherwise
+it's easy to test against a stale checkout or uncommitted local edits
+without realizing it.
+
+Override with `FORCE=1 make <target>` to build from whatever's currently
+checked out anyway (prints a warning instead of failing) — useful for
+testing an unmerged branch intentionally, but the resulting image tag still
+reflects that repo's actual `HEAD` SHA either way, so you can always tell
+what's really running.
+
+Every build is tagged with its source SHA(s) — `<stack-sha>-<agents-sha>`
+for lightspeed-stack (unique whenever either contributing repo changes), or
+just `<sha>` for the sandbox image — as well as a fixed alias tag
+(`kind-test-harness`, `ocp-harness`, `latest-amd64`) that manifests/helm
+values reference by name. The alias tag makes same-name deploys work
+without editing YAML per build; the SHA tag is what actually guarantees
+freshness (a `kind load`/registry push under a brand-new tag can't be
+served stale) and is what you should pass explicitly to `OCP_SANDBOX_IMAGE`/
+`OCP_PROD_SANDBOX_IMAGE` for the same reason.
 
 **Registering the CLI.** Registering against a self-signed cert + a
 hostname that isn't real DNS (like the `openshell-prod.example.com`

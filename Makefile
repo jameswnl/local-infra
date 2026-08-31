@@ -19,6 +19,16 @@ KIND_OPENSHELL_NS     ?= openshell-k8s
 KIND_OPENSHELL_PORT   ?= 9090
 KIND_GATEWAY_NAME     ?= local-kind
 
+# Source repos for images built by the *-lightspeed-* and *-sandbox-build
+# targets below. Each build verifies its repo is on a clean, up-to-date
+# origin/main checkout (scripts/check-clean-main.sh) before building, so
+# these targets never silently bake in stale or uncommitted source.
+LIGHTSPEED_STACK_REPO         ?= $(HOME)/ws/lightspeed-stack
+LIGHTSPEED_CLOUD_AGENTS_REPO  ?= $(HOME)/ws/lightspeed-cloud-agents
+LIGHTSPEED_SANDBOX_REPO       ?= $(HOME)/ws/lightspeed-agentic-sandbox
+LIGHTSPEED_STACK_IMAGE_REPO   ?= quay.io/jameswong/lightspeed-stack
+LIGHTSPEED_SANDBOX_IMAGE_REPO ?= quay.io/jameswong/lightspeed-agentic-sandbox
+
 OCP_PROJECT       ?= openshell
 OCP_CHART_VERSION ?= 0.0.111
 OCP_GATEWAY_NAME  ?= ocp
@@ -53,12 +63,15 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         kind-openshell-port-forward kind-openshell-register kind-openshell-test-spawn \
         kind-openshell-podman-up kind-openshell-podman-down kind-openshell-podman-logs \
         kind-openshell-podman-health kind-openshell-podman-register \
+        kind-lightspeed-build kind-lightspeed-apply kind-lightspeed-up \
         ocp-eval-up ocp-eval-status ocp-eval-agent-sandbox-up \
         ocp-eval-openshell-up ocp-eval-openshell-down ocp-eval-openshell-logs \
         ocp-eval-port-forward ocp-eval-register ocp-eval-test-eacces-repro \
+        ocp-sandbox-build \
         ocp-prod-check ocp-prod-up ocp-prod-status ocp-prod-agent-sandbox-up \
         ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up \
         ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs \
+        ocp-prod-lightspeed-build ocp-prod-lightspeed-apply ocp-prod-lightspeed-up \
         ocp-prod-register ocp-prod-quickstart ocp-prod-test-eacces-repro
 
 # ---------- Podman Compose ----------
@@ -218,6 +231,38 @@ kind-openshell-podman-health:  ## Check health of the legacy Podman-DooD OpenShe
 kind-openshell-podman-register:  ## Register the legacy Podman-DooD Kind OpenShell gateway with the CLI (one-time)
 	openshell gateway add http://localhost:9080 --name local-kind-podman
 
+# ---------- Kind: lightspeed-stack ----------
+#
+# Deploys lightspeed-stack + Postgres into the same namespace as the
+# canonical Kind OpenShell gateway (kind/lightspeed-stack.yaml), wired via
+# in-cluster Service DNS. Requires the harness-only image (not the official
+# product image, which has no cloud_agents dependency) -- kind-lightspeed-
+# build builds it from clean origin/main checkouts of lightspeed-stack and
+# lightspeed-cloud-agents and loads it into the Kind node so the freshness
+# guarantee actually holds (imagePullPolicy: Never means the manifest's
+# fixed "kind-test-harness" tag only ever reflects what was last loaded).
+#
+# Requires a one-time secret before the pod will actually start:
+#   kubectl --kubeconfig kind/kubeconfig -n openshell-k8s create secret \
+#     generic lightspeed-stack-llm-secret --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
+
+kind-lightspeed-build:  ## Build the lightspeed-stack harness image from clean main (stack + cloud_agents) and load it into Kind
+	@STACK_REPO=$(LIGHTSPEED_STACK_REPO) \
+	 AGENTS_REPO=$(LIGHTSPEED_CLOUD_AGENTS_REPO) \
+	 IMAGE_REPO=localhost/lightspeed-stack \
+	 ALIAS_TAG=kind-test-harness \
+	 PLATFORM=linux/arm64 \
+	 PUSH=false \
+	 KIND_CLUSTER=$(KIND_CLUSTER) \
+	 ./scripts/build-lightspeed-stack.sh
+
+kind-lightspeed-apply: kind-openshell-up  ## Apply lightspeed-stack to Kind, restarting it if already running (requires kind-lightspeed-build first)
+	@$(KUBECTL) apply -f kind/lightspeed-stack.yaml
+	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) rollout restart deployment/lightspeed-stack 2>/dev/null || true
+	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) rollout status deployment/lightspeed-stack --timeout=180s
+
+kind-lightspeed-up: kind-lightspeed-build kind-lightspeed-apply  ## Build lightspeed-stack from clean main and (re)deploy it to Kind alongside the gateway
+
 # ---------- OpenShift (oc) ----------
 #
 # Deploys the real OpenShell Helm chart (not raw manifests) using the
@@ -267,6 +312,22 @@ ocp-eval-register:  ## Register the OpenShift gateway with the OpenShell CLI (on
 
 ocp-eval-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-eval-register first)
 	./ocp/test-eacces-repro.sh $(OCP_GATEWAY_NAME) $(OCP_PROJECT) $(OCP_SANDBOX_IMAGE)
+
+# ---------- Sandbox image ----------
+#
+# Builds the agentic sandbox image used by both ocp-eval-openshell-up
+# (OCP_SANDBOX_IMAGE) and ocp-prod-openshell-up (OCP_PROD_SANDBOX_IMAGE)
+# from a clean origin/main checkout of lightspeed-agentic-sandbox. Prints
+# the immutable <image>:<sha> ref to use with either variable -- pass it
+# explicitly rather than relying on the mutable "latest-amd64" alias tag,
+# since that's also pushed but Kubernetes may not re-pull an unchanged tag.
+
+ocp-sandbox-build:  ## Build the agentic sandbox image from clean main and push it (use the printed <image>:<sha> ref as OCP_SANDBOX_IMAGE / OCP_PROD_SANDBOX_IMAGE)
+	@SANDBOX_REPO=$(LIGHTSPEED_SANDBOX_REPO) \
+	 IMAGE_REPO=$(LIGHTSPEED_SANDBOX_IMAGE_REPO) \
+	 ALIAS_TAG=latest-amd64 \
+	 PLATFORM=linux/amd64 \
+	 ./scripts/build-sandbox.sh
 
 # ---------- OpenShift (oc) — Production ----------
 #
@@ -348,6 +409,33 @@ ocp-prod-openshell-down:  ## Uninstall the production OpenShell release
 ocp-prod-openshell-logs:  ## Tail OpenShell gateway logs in production
 	oc -n $(OCP_PROD_PROJECT) logs -f statefulset/$(OCP_PROD_RELEASE)
 
+# ---------- OpenShift (oc) — Production: lightspeed-stack ----------
+#
+# Deploys lightspeed-stack + Postgres into the production project, wired to
+# the gateway via in-cluster Service DNS (see ocp/lightspeed-stack.yaml's
+# header for the required secrets and OIDC token refresh steps -- not
+# automated here). ocp-prod-lightspeed-build builds the harness image from
+# clean origin/main checkouts of lightspeed-stack and lightspeed-cloud-
+# agents and pushes it under the fixed "ocp-harness" tag the manifest
+# references; the manifest sets imagePullPolicy: Always specifically so
+# that a same-tag push is guaranteed to be re-pulled on rollout restart.
+
+ocp-prod-lightspeed-build:  ## Build the lightspeed-stack harness image from clean main (stack + cloud_agents) and push it
+	@STACK_REPO=$(LIGHTSPEED_STACK_REPO) \
+	 AGENTS_REPO=$(LIGHTSPEED_CLOUD_AGENTS_REPO) \
+	 IMAGE_REPO=$(LIGHTSPEED_STACK_IMAGE_REPO) \
+	 ALIAS_TAG=ocp-harness \
+	 PLATFORM=linux/amd64 \
+	 PUSH=true \
+	 ./scripts/build-lightspeed-stack.sh
+
+ocp-prod-lightspeed-apply:  ## Apply lightspeed-stack to the production project, restarting it if already running (requires ocp-prod-lightspeed-build first)
+	@oc -n $(OCP_PROD_PROJECT) apply -f ocp/lightspeed-stack.yaml
+	@oc -n $(OCP_PROD_PROJECT) rollout restart deployment/lightspeed-stack 2>/dev/null || true
+	@oc -n $(OCP_PROD_PROJECT) rollout status deployment/lightspeed-stack --timeout=180s
+
+ocp-prod-lightspeed-up: ocp-prod-lightspeed-build ocp-prod-lightspeed-apply  ## Build lightspeed-stack from clean main and (re)deploy it to production OpenShift
+
 ocp-prod-register:  ## Register the production gateway with the OpenShell CLI over OIDC
 	openshell gateway add https://$(OCP_PROD_HOSTNAME) --name $(OCP_PROD_GATEWAY_NAME) --oidc-issuer $(OCP_PROD_OIDC_ISSUER)
 	openshell gateway login $(OCP_PROD_GATEWAY_NAME)
@@ -355,7 +443,7 @@ ocp-prod-register:  ## Register the production gateway with the OpenShell CLI ov
 ocp-prod-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-prod-register first)
 	./ocp/test-eacces-repro.sh $(OCP_PROD_GATEWAY_NAME) $(OCP_PROD_PROJECT) $(OCP_PROD_SANDBOX_IMAGE)
 
-ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up  ## One-shot prod deploy on a brand-new cluster: bootstraps self-signed CA + dev Keycloak, computes a hostname, deploys
+ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up  ## One-shot prod deploy on a brand-new cluster: bootstraps self-signed CA + dev Keycloak, computes a hostname, deploys, and registers
 	@host="$(OCP_PROD_HOSTNAME)"; \
 	if [ -z "$$host" ]; then \
 		domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
@@ -375,6 +463,9 @@ ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned 
 	$(MAKE) ocp-prod-openshell-up \
 		OCP_PROD_HOSTNAME="$$host" \
 		OCP_PROD_CLUSTER_ISSUER="$(OCP_PROD_SELFSIGNED_ISSUER_NAME)" \
+		OCP_PROD_OIDC_ISSUER="$$issuer"; \
+	$(MAKE) ocp-prod-register \
+		OCP_PROD_HOSTNAME="$$host" \
 		OCP_PROD_OIDC_ISSUER="$$issuer"
 
 # ---------- Help ----------
