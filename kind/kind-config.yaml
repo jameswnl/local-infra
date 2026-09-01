@@ -16,6 +16,3 @@ nodes:
       - containerPort: 30080
         hostPort: 9080
         protocol: TCP
-      - containerPort: 30081
-        hostPort: 9081
-        protocol: TCP

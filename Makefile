@@ -6,8 +6,7 @@
 # Helm chart + Agent Sandbox controller (Kubernetes compute driver) --
 # matching the architecture rule that all K8s/OCP/Kind deployments use the
 # kubernetes driver, Podman deployments use the podman driver, no other
-# combination. The old Podman-DooD Kind path is kept as `kind-openshell-
-# podman-up` for reference/comparison, not as a supported deployment target.
+# combination.
 # OCP targets deploy the real OpenShell Helm chart to an existing OpenShift
 # project via `oc` (assumes you're already logged in).
 
@@ -16,7 +15,7 @@ KIND_KUBECONFIG       ?= $(CURDIR)/kind/kubeconfig
 KUBECTL               := kubectl --kubeconfig $(KIND_KUBECONFIG)
 KIND_CHART_VERSION    ?= 0.0.111
 KIND_OPENSHELL_NS     ?= openshell-k8s
-KIND_OPENSHELL_PORT   ?= 9090
+KIND_OPENSHELL_PORT   ?= 9080
 KIND_GATEWAY_NAME     ?= local-kind
 
 # Source repos for images built by the *-lightspeed-* and *-sandbox-build
@@ -56,14 +55,10 @@ OCP_PROD_SELFSIGNED_CA_SECRET   ?= openshell-selfsigned-ca-tls
 
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
-.PHONY: up down logs logs-otel logs-openshell openshell-health jaeger status register help \
-        up-openshell down-openshell obs-up obs-down up-obs down-obs otel-up jaeger-up logs-obs \
-        observability-up observability-down up-observability down-observability logs-observability \
+.PHONY: podman-obs-up podman-obs-down podman-obs-logs podman-obs-jaeger podman-openshell-up podman-openshell-down podman-openshell-logs podman-openshell-register podman-openshell-health podman-down podman-logs podman-status help \
         kind-up kind-down kind-status kind-agent-sandbox-up \
         kind-openshell-up kind-openshell-down kind-openshell-logs \
-        kind-openshell-port-forward kind-openshell-register kind-openshell-test-spawn \
-        kind-openshell-podman-up kind-openshell-podman-down kind-openshell-podman-logs \
-        kind-openshell-podman-health kind-openshell-podman-register \
+        kind-openshell-register kind-openshell-test-spawn \
         kind-lightspeed-build kind-lightspeed-apply kind-lightspeed-up \
         ocp-eval-up ocp-eval-status ocp-eval-agent-sandbox-up \
         ocp-eval-openshell-up ocp-eval-openshell-down ocp-eval-openshell-logs \
@@ -77,50 +72,7 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
 
 # ---------- Podman Compose ----------
 
-up:  ## Start everything (OTel + Jaeger + OpenShell)
-	podman compose up -d
-	@echo ""
-	@echo "Jaeger UI:   http://localhost:16686"
-	@echo "OTel:        grpc://localhost:4317  http://localhost:4318"
-	@echo "OpenShell:   http://localhost:8080"
-	@echo ""
-	@echo "Register (one-time):  make register"
-
-up-openshell:  ## Start only OpenShell
-	podman compose up -d gateway
-	@echo ""
-	@echo "OpenShell: http://localhost:8080"
-
-down:  ## Stop everything
-	podman compose down
-
-down-openshell:  ## Stop only OpenShell
-	podman compose down gateway
-
-logs:  ## Tail all logs
-	podman compose logs -f
-
-logs-otel:  ## Tail OTel collector logs
-	podman compose logs -f otel-collector
-
-logs-openshell:  ## Tail OpenShell logs
-	podman compose logs -f gateway
-
-openshell-health:  ## Check OpenShell health
-	@curl -sf http://localhost:8081/healthz && echo " OK" || echo " UNHEALTHY"
-
-jaeger:  ## Open Jaeger UI in browser
-	@open http://localhost:16686 2>/dev/null || xdg-open http://localhost:16686 2>/dev/null || true
-
-status:  ## Show running containers
-	@podman compose ps
-
-register:  ## Register OpenShell with CLI (one-time)
-	openshell gateway add http://localhost:8080 --name local-podman
-
-# ---------- Observability (OTel Collector + Jaeger/Jaeger UI) ----------
-
-obs-up:  ## Start observability stack (OTel Collector + Jaeger/Jaeger UI) in Podman
+podman-obs-up:  ## Start observability stack (OTel + Jaeger) via Podman
 	podman compose up -d otel-collector jaeger
 	@echo ""
 	@echo "OTel Collector gRPC: grpc://localhost:4317"
@@ -128,25 +80,46 @@ obs-up:  ## Start observability stack (OTel Collector + Jaeger/Jaeger UI) in Pod
 	@echo "Jaeger UI:           http://localhost:16686"
 	@echo ""
 
-obs-down:  ## Stop observability stack (OTel Collector + Jaeger)
+podman-obs-down:  ## Stop observability stack (OTel + Jaeger) via Podman
 	podman compose stop otel-collector jaeger 2>/dev/null || podman compose down otel-collector jaeger 2>/dev/null || true
 	@podman compose rm -f otel-collector jaeger 2>/dev/null || true
 
-logs-obs:  ## Tail observability logs (OTel + Jaeger)
+podman-obs-logs:  ## Tail observability logs (OTel + Jaeger) via Podman
 	podman compose logs -f otel-collector jaeger
 
-# Aliases for discoverability
-up-obs: obs-up
-otel-up: obs-up
-jaeger-up: obs-up
-down-obs: obs-down
+podman-obs-jaeger:  ## Open Jaeger UI in browser (observability)
+	@open http://localhost:16686 2>/dev/null || xdg-open http://localhost:16686 2>/dev/null || true
 
-# Deprecated long-form aliases (kept for compatibility)
-observability-up: obs-up
-observability-down: obs-down
-logs-observability: logs-obs
-up-observability: obs-up
-down-observability: obs-down
+podman-openshell-up:  ## Start OpenShell gateway via Podman
+	podman compose up -d gateway
+	@echo ""
+	@echo "OpenShell: http://localhost:9081"
+	@echo ""
+	@echo "Register (one-time):  make podman-openshell-register"
+
+podman-openshell-down:  ## Stop OpenShell gateway via Podman
+	podman compose stop gateway 2>/dev/null || true
+	@podman compose rm -f gateway 2>/dev/null || true
+
+podman-openshell-logs:  ## Tail OpenShell logs via Podman
+	podman compose logs -f gateway
+
+podman-openshell-health:  ## Check Podman OpenShell health (internal)
+	@curl -sf http://localhost:8081/healthz 2>&1 | head -n 1 && echo " OK" || echo " UNHEALTHY (health is internal-only, use podman exec if needed)"
+
+podman-openshell-register:  ## Register Podman OpenShell gateway with CLI (one-time)
+	openshell gateway add http://localhost:9081 --name local-podman
+
+podman-down:  ## Stop everything (all Podman services)
+	podman compose down
+
+podman-logs:  ## Tail all Podman logs
+	podman compose logs -f
+
+podman-status:  ## Show Podman running containers
+	@podman compose ps
+
+
 
 # ---------- Kind: Cluster ----------
 
@@ -199,10 +172,12 @@ kind-openshell-up: kind-up kind-agent-sandbox-up  ## Deploy OpenShell to Kind (k
 		--version $(KIND_CHART_VERSION) \
 		--namespace $(KIND_OPENSHELL_NS) \
 		-f kind/values-k8s-driver.yaml \
+		--set service.type=NodePort \
+		--set service.nodePort=30080 \
 		--kubeconfig $(KIND_KUBECONFIG)
 	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) rollout status statefulset/openshell-k8s --timeout=180s
 	@echo ""
-	@echo "Forward the gateway:  make kind-openshell-port-forward"
+	@echo "OpenShell: http://localhost:$(KIND_OPENSHELL_PORT) (via NodePort 30080 -> hostPort 9080)"
 	@echo "Register (one-time):  make kind-openshell-register"
 	@echo "Test a real spawn:    make kind-openshell-test-spawn"
 
@@ -212,55 +187,14 @@ kind-openshell-down:  ## Uninstall OpenShell from Kind
 kind-openshell-logs:  ## Tail OpenShell gateway logs in Kind
 	$(KUBECTL) -n $(KIND_OPENSHELL_NS) logs -f statefulset/openshell-k8s
 
-kind-openshell-port-forward:  ## Port-forward the Kind OpenShell gateway to localhost (foreground)
-	$(KUBECTL) -n $(KIND_OPENSHELL_NS) port-forward svc/openshell-k8s $(KIND_OPENSHELL_PORT):8080
-
-kind-openshell-register:  ## Register the Kind OpenShell gateway with the CLI (one-time; requires port-forward running)
+kind-openshell-register:  ## Register the Kind OpenShell gateway with the CLI (one-time)
 	# No --local: that flag extracts mTLS certs from a Docker container, but
 	# kind/values-k8s-driver.yaml runs with disableTls/allowUnauthenticatedUsers,
 	# and the gateway is a K8s pod, not a host Docker container.
 	openshell gateway add http://127.0.0.1:$(KIND_OPENSHELL_PORT) --name $(KIND_GATEWAY_NAME)
 
 kind-openshell-test-spawn:  ## Run a real spawn test via the kubernetes driver (requires cloud_agents + openshell installed)
-	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) port-forward svc/openshell-k8s $(KIND_OPENSHELL_PORT):8080 \
-		>/tmp/kind-openshell-port-forward.log 2>&1 & \
-	PF_PID=$$!; \
-	sleep 2; \
-	OPENSHELL_GATEWAY_URL=localhost:$(KIND_OPENSHELL_PORT) python3 kind/test-k8s-driver-spawn.py; \
-	STATUS=$$?; \
-	kill $$PF_PID 2>/dev/null; \
-	exit $$STATUS
-
-# ---------- Kind: OpenShell (legacy -- Podman DooD) ----------
-#
-# Reference/comparison path only: sandboxes run via the Podman compute
-# driver against the host's Podman socket mounted into the Kind node
-# (Docker-out-of-Docker style). Not a supported deployment target under the
-# OpenShellSpawner-only architecture (Kind counts as a Kubernetes target,
-# which uses the kubernetes driver exclusively) -- kept for debugging/
-# comparison against kind-openshell-up above.
-
-kind-openshell-podman-up: kind-up  ## Deploy OpenShell to Kind via Podman DooD (legacy, not a supported target)
-	@echo "[kind] Deploying OpenShell (podman driver, legacy)..."
-	@$(KUBECTL) apply -f kind/openshell-gateway.yaml
-	@$(KUBECTL) -n openshell rollout status deployment/openshell-gateway --timeout=120s
-	@echo ""
-	@echo "OpenShell: http://localhost:9080"
-	@echo "Health:    http://localhost:9081/healthz"
-	@echo ""
-	@echo "Register (one-time):  make kind-openshell-podman-register"
-
-kind-openshell-podman-down:  ## Remove the legacy Podman-DooD OpenShell deployment from Kind
-	$(KUBECTL) delete -f kind/openshell-gateway.yaml --ignore-not-found
-
-kind-openshell-podman-logs:  ## Tail logs for the legacy Podman-DooD OpenShell deployment
-	$(KUBECTL) -n openshell logs -f deployment/openshell-gateway
-
-kind-openshell-podman-health:  ## Check health of the legacy Podman-DooD OpenShell deployment
-	@curl -sf http://localhost:9081/healthz && echo " OK" || echo " UNHEALTHY"
-
-kind-openshell-podman-register:  ## Register the legacy Podman-DooD Kind OpenShell gateway with the CLI (one-time)
-	openshell gateway add http://localhost:9080 --name local-kind-podman
+	OPENSHELL_GATEWAY_URL=localhost:$(KIND_OPENSHELL_PORT) $(HOME)/ws/lightspeed-cloud-agents/.venv/bin/python kind/test-k8s-driver-spawn.py
 
 # ---------- Kind: lightspeed-stack ----------
 #

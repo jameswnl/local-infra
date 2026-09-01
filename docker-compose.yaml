@@ -43,8 +43,7 @@ services:
     userns_mode: keep-id:uid=0,gid=0
 
     ports:
-      - "127.0.0.1:${OPENSHELL_PORT:-8080}:8080"
-      - "127.0.0.1:${OPENSHELL_HEALTH_PORT:-8081}:8081"
+      - "127.0.0.1:${OPENSHELL_PORT:-9081}:8080"
 
     volumes:
       # Podman socket — lets the gateway create and manage sandbox containers.
