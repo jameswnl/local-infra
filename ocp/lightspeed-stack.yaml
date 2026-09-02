@@ -1,7 +1,7 @@
 # lightspeed-stack deployment for the real OCP "production" OpenShell
 # gateway (make ocp-prod-openshell-up), wired via in-cluster Service DNS
 # with real TLS (trusting the gateway's own internal-DNS server cert) and
-# a real OIDC bearer token from the dev Keycloak.
+# a confidential-client OIDC identity minted from the dev Keycloak.
 #
 # Requires the harness-only image (see
 # ~/ws/lightspeed-stack/deploy/lightspeed-stack/Containerfile.harness,
@@ -12,23 +12,17 @@
 #   oc -n openshell-prod create secret generic lightspeed-stack-llm-secret \
 #     --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
 #
-# Nor is the OIDC bearer token -- it's short-lived (5 min TTL from the dev
-# Keycloak) and must be refreshed manually for now (see "Known gap" below):
-#   oc -n keycloak port-forward svc/keycloak 9090:9090 &
-#   TOKEN=$(curl -s -X POST http://localhost:9090/realms/openshell/protocol/openid-connect/token \
-#     -d 'grant_type=password&client_id=openshell-cli&username=admin@test&password=admin' \
-#     | jq -r .access_token)
-#   oc -n openshell-prod create secret generic lightspeed-stack-openshell-token \
-#     --from-literal=OPENSHELL_BEARER_TOKEN="$TOKEN" --dry-run=client -o yaml | oc apply -f -
-#   oc -n openshell-prod rollout restart deployment/lightspeed-stack
-#
-# Known gap: SpawnerConfiguration.openshell_bearer_token is a static config
-# value with no refresh mechanism (see workflow/spawner_factory.py's
-# singleton-caching docstring) -- it will need re-issuing (and a pod
-# restart) whenever it expires. Fine for proving the path works end to
-# end; not fine for anything long-running. A real deployment would need
-# either a much longer-lived service-account-style OIDC client, or a
-# refresh loop in lightspeed-stack itself.
+# Nor is the OpenShell OIDC identity. The stack now authenticates to the
+# gateway via the confidential service-account client "lcore-agents" using
+# the Client Credentials grant, and refreshes its own short-lived tokens
+# (SpawnerConfiguration.openshell_oidc_* -> OidcClientCredentialsTokenProvider,
+# see lightspeed-stack's workflow/spawner_factory.py). No more manual token
+# re-issuing or pod restarts on expiry. Provision the client and create the
+# Secret this Deployment reads (lightspeed-stack-openshell-oidc) with:
+#   make ocp-prod-keycloak-lcore-client
+# It ensures the client on the running Keycloak (kcadm), reads its secret +
+# service-account subject, and writes both the k8s Secret and ./.env.ocp-prod
+# (the latter for a local `uv run` of the stack against the external route).
 apiVersion: v1
 kind: Secret
 metadata:
@@ -153,7 +147,10 @@ data:
       openshell_gateway_url: "openshell-prod:8080"
       openshell_driver: kubernetes
       openshell_tls_ca: /etc/openshell-tls/ca.crt
-      openshell_bearer_token: "${env.OPENSHELL_BEARER_TOKEN}"
+      openshell_oidc_issuer: "${env.OPENSHELL_OIDC_ISSUER}"
+      openshell_oidc_client_id: "${env.OPENSHELL_OIDC_CLIENT_ID}"
+      openshell_oidc_client_secret: "${env.OPENSHELL_OIDC_CLIENT_SECRET}"
+      openshell_oidc_audience: "${env.OPENSHELL_OIDC_AUDIENCE}"
       sandbox_image: "quay.io/jameswong/lightspeed-agentic-sandbox:latest-amd64"
 ---
 apiVersion: apps/v1
@@ -198,11 +195,26 @@ spec:
                 secretKeyRef:
                   name: lightspeed-stack-secrets
                   key: POSTGRES_PASSWORD
-            - name: OPENSHELL_BEARER_TOKEN
+            - name: OPENSHELL_OIDC_ISSUER
               valueFrom:
                 secretKeyRef:
-                  name: lightspeed-stack-openshell-token
-                  key: OPENSHELL_BEARER_TOKEN
+                  name: lightspeed-stack-openshell-oidc
+                  key: OPENSHELL_OIDC_ISSUER
+            - name: OPENSHELL_OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lightspeed-stack-openshell-oidc
+                  key: OPENSHELL_OIDC_CLIENT_ID
+            - name: OPENSHELL_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lightspeed-stack-openshell-oidc
+                  key: OPENSHELL_OIDC_CLIENT_SECRET
+            - name: OPENSHELL_OIDC_AUDIENCE
+              valueFrom:
+                secretKeyRef:
+                  name: lightspeed-stack-openshell-oidc
+                  key: OPENSHELL_OIDC_AUDIENCE
           volumeMounts:
             - name: config
               mountPath: /etc/lightspeed/lightspeed-stack.yaml

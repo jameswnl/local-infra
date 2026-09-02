@@ -357,6 +357,34 @@
         }
       ],
       "defaultClientScopes": ["openid", "profile", "email", "roles", "web-origins", "acr", "openshell:all"]
+    },
+    {
+      "clientId": "lcore-agents",
+      "name": "Lightspeed Core Agents",
+      "description": "Confidential service-account client lightspeed-stack uses to mint short-lived gateway tokens via the Client Credentials grant (auto-refreshing, see workflow/openshell_oidc_token_provider.py). Provisioned/read back by ocp/ensure-lcore-oidc-client.sh.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "lcore-agents-dev-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": true,
+      "protocolMappers": [
+        {
+          "name": "lcore-agents audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "openshell-cli",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": ["openid", "profile", "email", "roles", "web-origins", "acr", "openshell:all"]
     }
   ],
   "users": [
