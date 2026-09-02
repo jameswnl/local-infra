@@ -46,11 +46,21 @@
 #   ENV_FILE                ./.env.ocp-prod
 #   WORKSPACE               default          (gateway workspace to grant the
 #                                             service account membership in)
+#   WORKSPACE_ROLE          admin            (role to grant; the stack's
+#                                             provider-profile setup
+#                                             (ImportProviderProfiles) requires
+#                                             'admin', not 'user')
 #   GATEWAY_NAME            ocp-prod         (openshell CLI gateway name used
 #                                             to add the workspace member)
 #   GATEWAY_INSECURE        true             (pass --gateway-insecure to the
 #                                             CLI; the gateway's self-signed
 #                                             CA isn't in the CLI's trust store)
+#   SERVER_TLS_SECRET       <release>-server-external-tls
+#                                             (secret holding the gateway's
+#                                             external-route CA to extract)
+#   TLS_CA_FILE             ~/.config/openshell/gateways/<gw>/ca.crt
+#                                             (where to write the extracted CA;
+#                                             recorded as OPENSHELL_TLS_CA)
 #   SKIP_WORKSPACE_MEMBER   (unset)          set to any value to skip the
 #                                             workspace-membership step
 set -euo pipefail
@@ -71,9 +81,15 @@ TARGET_NAMESPACE="${TARGET_NAMESPACE:-openshell-prod}"
 OIDC_SECRET_NAME="${OIDC_SECRET_NAME:-lightspeed-stack-openshell-oidc}"
 ENV_FILE="${ENV_FILE:-${REPO_DIR}/.env.ocp-prod}"
 WORKSPACE="${WORKSPACE:-default}"
+WORKSPACE_ROLE="${WORKSPACE_ROLE:-admin}"
 GATEWAY_NAME="${GATEWAY_NAME:-ocp-prod}"
 GATEWAY_INSECURE="${GATEWAY_INSECURE:-true}"
 OPENSHELL_CLI="${OPENSHELL_CLI:-openshell}"
+# The gateway's external-route TLS secret and where to drop its self-signed CA
+# so the stack (openshell_tls_ca) can verify the gRPC connection. certifi
+# can't -- the CA is self-signed. Written into ENV_FILE as OPENSHELL_TLS_CA.
+SERVER_TLS_SECRET="${SERVER_TLS_SECRET:-${OCP_PROD_RELEASE:-openshell-prod}-server-external-tls}"
+TLS_CA_FILE="${TLS_CA_FILE:-${HOME}/.config/openshell/gateways/${GATEWAY_NAME}/ca.crt}"
 
 KCADM="/opt/keycloak/bin/kcadm.sh"
 
@@ -161,9 +177,38 @@ if [ -z "${SA_SUBJECT}" ]; then
   echo "warning: could not read the service-account user id -- leaving SA_SUBJECT empty." >&2
 fi
 
+# Ensure the written gateway URL carries an explicit gRPC port so it's
+# directly usable by lightspeed-stack. The Makefile passes https://<host>
+# (no port), but the stack's spawner strips the scheme and uses the remainder
+# verbatim as a gRPC endpoint, which needs a port. The OCP Route serves gRPC
+# over TLS on 443. Skip if a port is already present (idempotent).
+gateway_hostport="${GATEWAY_URL#*://}"
+case "${gateway_hostport}" in
+  *:*) ;;                              # already has a :port -- leave as-is
+  *) GATEWAY_URL="${GATEWAY_URL}:443" ;;
+esac
+
+# Extract the gateway's external-route self-signed CA so the stack can verify
+# the gRPC connection (openshell_tls_ca). Written to TLS_CA_FILE and recorded
+# as OPENSHELL_TLS_CA in ENV_FILE, so sourcing ENV_FILE is all a local run
+# needs -- no manual `oc extract` / export. Non-fatal if the secret is absent.
+TLS_CA_ENV=""
+echo "[lcore-client] Extracting gateway CA from ${TARGET_NAMESPACE}/${SERVER_TLS_SECRET}..."
+ca_b64="$(oc -n "${TARGET_NAMESPACE}" get secret "${SERVER_TLS_SECRET}" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)"
+if [ -n "${ca_b64}" ]; then
+  mkdir -p "$(dirname "${TLS_CA_FILE}")"
+  printf '%s' "${ca_b64}" | base64 -d > "${TLS_CA_FILE}"
+  TLS_CA_ENV="${TLS_CA_FILE}"
+  echo "[lcore-client] Wrote gateway CA to ${TLS_CA_FILE}."
+else
+  echo "warning: secret ${TARGET_NAMESPACE}/${SERVER_TLS_SECRET} has no ca.crt --" >&2
+  echo "         OPENSHELL_TLS_CA left empty; set it manually or the stack's TLS" >&2
+  echo "         handshake to the gateway will fail (self-signed CA)." >&2
+fi
+
 echo "[lcore-client] Writing ${ENV_FILE}..."
-printf 'OPENSHELL_OIDC_CLIENT_SECRET=%s\nOPENSHELL_OIDC_CLIENT_ID=%s\nOPENSHELL_OIDC_ISSUER=%s\nOPENSHELL_OIDC_AUDIENCE=%s\nOPENSHELL_GATEWAY_URL=%s\nOPENSHELL_SA_SUBJECT=%s\n' \
-  "${CLIENT_SECRET}" "${CLIENT_ID}" "${OIDC_ISSUER}" "${OIDC_AUDIENCE}" "${GATEWAY_URL}" "${SA_SUBJECT}" > "${ENV_FILE}"
+printf 'OPENSHELL_OIDC_CLIENT_SECRET=%s\nOPENSHELL_OIDC_CLIENT_ID=%s\nOPENSHELL_OIDC_ISSUER=%s\nOPENSHELL_OIDC_AUDIENCE=%s\nOPENSHELL_GATEWAY_URL=%s\nOPENSHELL_TLS_CA=%s\nOPENSHELL_SA_SUBJECT=%s\n' \
+  "${CLIENT_SECRET}" "${CLIENT_ID}" "${OIDC_ISSUER}" "${OIDC_AUDIENCE}" "${GATEWAY_URL}" "${TLS_CA_ENV}" "${SA_SUBJECT}" > "${ENV_FILE}"
 
 echo "[lcore-client] Creating/updating Secret ${OIDC_SECRET_NAME} in namespace ${TARGET_NAMESPACE}..."
 oc -n "${TARGET_NAMESPACE}" create secret generic "${OIDC_SECRET_NAME}" \
@@ -178,9 +223,15 @@ oc -n "${TARGET_NAMESPACE}" create secret generic "${OIDC_SECRET_NAME}" \
 # freshly-created service account is a member of no workspace, so every RPC
 # fails with PERMISSION_DENIED ("not a member of workspace ...") until its
 # subject is added. This is why OPENSHELL_SA_SUBJECT exists -- it's the id we
-# grant membership to here. Uses the openshell CLI (already logged in as an
-# admin by `make ocp-prod-register`); --gateway-insecure because the gateway's
-# self-signed CA isn't in the CLI's trust store.
+# grant membership to here. The role must be 'admin': the stack's provider-
+# profile setup (ImportProviderProfiles, run on every ephemeral spawn) requires
+# workspace-admin, not merely 'user'. Uses the openshell CLI (already logged in
+# as an admin by `make ocp-prod-register`); --gateway-insecure because the
+# gateway's self-signed CA isn't in the CLI's trust store.
+#
+# `member add` won't upgrade an existing member's role ("member already
+# exists"), so reconcile: if the subject is present with the wrong role, remove
+# and re-add; if absent, add; if already correct, leave it.
 if [ -n "${SKIP_WORKSPACE_MEMBER:-}" ]; then
   echo "[lcore-client] SKIP_WORKSPACE_MEMBER set -- skipping workspace membership grant."
 elif [ -z "${SA_SUBJECT}" ]; then
@@ -189,17 +240,24 @@ elif [ -z "${SA_SUBJECT}" ]; then
 elif ! command -v "${OPENSHELL_CLI}" >/dev/null 2>&1; then
   echo "warning: '${OPENSHELL_CLI}' CLI not found -- skipping workspace membership grant." >&2
   echo "         Grant it manually, then the stack can spawn:" >&2
-  echo "         ${OPENSHELL_CLI} workspace member add --workspace ${WORKSPACE} --subject ${SA_SUBJECT} --role user" >&2
+  echo "         ${OPENSHELL_CLI} workspace member add --workspace ${WORKSPACE} --subject ${SA_SUBJECT} --role ${WORKSPACE_ROLE}" >&2
 else
   insecure_flag=""
   if [ "${GATEWAY_INSECURE}" = "true" ]; then insecure_flag="--gateway-insecure"; fi
-  echo "[lcore-client] Ensuring service account ${SA_SUBJECT} is a member of workspace '${WORKSPACE}'..."
-  if "${OPENSHELL_CLI}" ${insecure_flag} -g "${GATEWAY_NAME}" workspace member list --workspace "${WORKSPACE}" 2>/dev/null \
-      | grep -q "${SA_SUBJECT}"; then
-    echo "[lcore-client] Already a member of '${WORKSPACE}'."
+  echo "[lcore-client] Ensuring service account ${SA_SUBJECT} is an '${WORKSPACE_ROLE}' of workspace '${WORKSPACE}'..."
+  # Grab the current role from the member list row ("<subject>  <role>"), if any.
+  current_role="$("${OPENSHELL_CLI}" ${insecure_flag} -g "${GATEWAY_NAME}" workspace member list --workspace "${WORKSPACE}" 2>/dev/null \
+    | grep "${SA_SUBJECT}" | awk '{print $NF}' | head -n1)"
+  if [ "${current_role}" = "${WORKSPACE_ROLE}" ]; then
+    echo "[lcore-client] Already an '${WORKSPACE_ROLE}' of '${WORKSPACE}'."
   else
+    if [ -n "${current_role}" ]; then
+      echo "[lcore-client] Member exists with role '${current_role}' -- removing to re-grant as '${WORKSPACE_ROLE}'..."
+      "${OPENSHELL_CLI}" ${insecure_flag} -g "${GATEWAY_NAME}" workspace member remove \
+        --workspace "${WORKSPACE}" --subject "${SA_SUBJECT}"
+    fi
     "${OPENSHELL_CLI}" ${insecure_flag} -g "${GATEWAY_NAME}" workspace member add \
-      --workspace "${WORKSPACE}" --subject "${SA_SUBJECT}" --role user
+      --workspace "${WORKSPACE}" --subject "${SA_SUBJECT}" --role "${WORKSPACE_ROLE}"
   fi
 fi
 
@@ -211,7 +269,8 @@ echo "  SA subject:    ${SA_SUBJECT:-<unavailable>}"
 echo "  Env file:      ${ENV_FILE}"
 echo "  K8s secret:    ${TARGET_NAMESPACE}/${OIDC_SECRET_NAME}"
 echo ""
+echo "  Gateway CA:    ${TLS_CA_ENV:-<unavailable>}"
 echo "  Local run:     set -a; . ${ENV_FILE}; set +a; then run lightspeed-stack"
-echo "                 (remember GATEWAY_URL needs the :443 port for gRPC, and"
-echo "                  point openshell_tls_ca at the gateway's self-signed CA)."
+echo "                 (GATEWAY_URL carries the :443 gRPC port and OPENSHELL_TLS_CA"
+echo "                  is set -- sourcing the env file is all that's needed)."
 echo "  In-cluster:    make ocp-prod-lightspeed-apply   # picks up the secret"
