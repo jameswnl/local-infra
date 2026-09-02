@@ -50,6 +50,7 @@ OCP_PROD_CLUSTER_ISSUER ?=
 OCP_PROD_ISSUER_KIND   ?= ClusterIssuer
 OCP_PROD_OIDC_ISSUER   ?=
 OCP_PROD_OIDC_AUDIENCE ?= openshell-cli
+OCP_PROD_KEYCLOAK_HOST  ?=
 OCP_PROD_SELFSIGNED_ISSUER_NAME ?= openshell-selfsigned-ca
 OCP_PROD_SELFSIGNED_CA_SECRET   ?= openshell-selfsigned-ca-tls
 
@@ -65,8 +66,8 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         ocp-eval-port-forward ocp-eval-register ocp-eval-test-eacces-repro \
         ocp-sandbox-build \
         ocp-prod-check ocp-prod-up ocp-prod-status ocp-prod-agent-sandbox-up \
-        ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up \
-        ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs \
+        ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up ocp-prod-keycloak-route \
+        ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs ocp-prod-env \
         ocp-prod-lightspeed-build ocp-prod-lightspeed-apply ocp-prod-lightspeed-up \
         ocp-prod-register ocp-prod-quickstart ocp-prod-test-eacces-repro
 
@@ -337,6 +338,39 @@ ocp-prod-clusterissuer-selfsigned:  ## Bootstrap a self-signed CA + ClusterIssue
 ocp-prod-keycloak-up:  ## Deploy a dev-grade Keycloak (not persistent) for testing the OIDC production path
 	./ocp/install-dev-keycloak.sh
 
+ocp-prod-keycloak-route:  ## Expose dev Keycloak via Route (avoids port-forward for OIDC)
+	@host="$(OCP_PROD_KEYCLOAK_HOST)"; \
+	if [ -z "$$host" ]; then \
+		domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
+		if [ -z "$$domain" ]; then \
+			echo "error: could not read the cluster's default Ingress domain (ingresses.config.openshift.io/cluster)." >&2; \
+			echo "Set OCP_PROD_KEYCLOAK_HOST explicitly, e.g. OCP_PROD_KEYCLOAK_HOST=keycloak.apps.example.com make ocp-prod-keycloak-route" >&2; \
+			exit 1; \
+		fi; \
+		host="keycloak-$(OCP_PROD_PROJECT).$$domain"; \
+		echo "OCP_PROD_KEYCLOAK_HOST not set -- using $$host"; \
+	fi; \
+	echo "[keycloak] Exposing svc/keycloak as Route $$host (edge TLS, using the router's default cert)..."; \
+	echo "[keycloak] http and https both served directly (no redirect) -- the OIDC issuer/discovery URLs stay http to match Keycloak's issued token 'iss' claim, while https satisfies browsers that force-upgrade navigation."; \
+	oc -n keycloak create route edge keycloak --service=keycloak --hostname="$$host" \
+		--insecure-policy=Allow --port=8080 --dry-run=client -o yaml | oc apply -f -; \
+	oc -n keycloak wait --for=condition=Admitted route/keycloak --timeout=60s 2>/dev/null || true; \
+	echo "[keycloak] Patching KC_HOSTNAME to $$host..."; \
+	oc -n keycloak set env deployment/keycloak KC_HOSTNAME="$$host" --overwrite; \
+	oc -n keycloak rollout status deployment/keycloak --timeout=120s; \
+	echo "[keycloak] Waiting for discovery endpoint..."; \
+	for i in 1 2 3 4 5 6; do \
+		if curl -sf http://$$host/realms/openshell/.well-known/openid-configuration 2>/dev/null | grep -q '"issuer"'; then \
+			echo "[keycloak] Discovery ready"; break; \
+		fi; \
+		echo "  retry $$i/6..."; sleep 5; \
+	done; \
+	curl -s http://$$host/realms/openshell/.well-known/openid-configuration 2>/dev/null | head -c 300; echo ""; \
+	echo ""; \
+	echo "Keycloak Route:  http://$$host and https://$$host (both served directly, no redirect)"; \
+	echo "Issuer:          http://$$host/realms/openshell"; \
+	echo "Discovery:       http://$$host/realms/openshell/.well-known/openid-configuration"
+
 ocp-prod-openshell-up: ocp-prod-check ocp-prod-up ocp-prod-agent-sandbox-up  ## Deploy OpenShell to OpenShift (production: real TLS + OIDC)
 	# SA name follows Helm's <release-name>-sandbox convention, not a fixed
 	# "openshell-sandbox" -- the eval target's hardcoded release name
@@ -402,16 +436,78 @@ ocp-prod-lightspeed-apply:  ## Apply lightspeed-stack to the production project,
 ocp-prod-lightspeed-up: ocp-prod-lightspeed-build ocp-prod-lightspeed-apply  ## Build lightspeed-stack from clean main and (re)deploy it to production OpenShift
 
 ocp-prod-register:  ## Register the production gateway with the OpenShell CLI over OIDC
+	@if [ -z "$(OCP_PROD_HOSTNAME)" ] || [ -z "$(OCP_PROD_OIDC_ISSUER)" ]; then \
+		echo "error: OCP_PROD_HOSTNAME and OCP_PROD_OIDC_ISSUER must be set." >&2; \
+		echo "Run 'make ocp-prod-quickstart' instead, which computes these for you," >&2; \
+		echo "or pass them explicitly, e.g.:" >&2; \
+		echo "  OCP_PROD_HOSTNAME=openshell-prod-openshell-prod.apps.example.com \\" >&2; \
+		echo "  OCP_PROD_OIDC_ISSUER=http://keycloak-openshell-prod.apps.example.com/realms/openshell \\" >&2; \
+		echo "  make ocp-prod-register" >&2; \
+		exit 1; \
+	fi
+	@if openshell gateway list -o json | jq -e '.[] | select(.name == "$(OCP_PROD_GATEWAY_NAME)")' >/dev/null 2>&1; then \
+		echo "[register] Gateway '$(OCP_PROD_GATEWAY_NAME)' already registered, removing stale entry first..."; \
+		openshell gateway remove $(OCP_PROD_GATEWAY_NAME); \
+	fi
+	@echo "[register] Verifying OIDC discovery is stable before opening the browser..."; \
+	ok=0; \
+	for i in 1 2 3 4 5 6; do \
+		if curl -sf "$(OCP_PROD_OIDC_ISSUER)/.well-known/openid-configuration" 2>/dev/null | grep -q '"issuer"'; then \
+			ok=$$((ok + 1)); \
+			if [ "$$ok" -ge 3 ]; then break; fi; \
+		else \
+			ok=0; \
+		fi; \
+		sleep 3; \
+	done; \
+	if [ "$$ok" -lt 3 ]; then \
+		echo "error: OIDC discovery at $(OCP_PROD_OIDC_ISSUER) is not stable -- not opening the browser." >&2; \
+		exit 1; \
+	fi
 	openshell gateway add https://$(OCP_PROD_HOSTNAME) --name $(OCP_PROD_GATEWAY_NAME) --oidc-issuer $(OCP_PROD_OIDC_ISSUER)
 	openshell gateway login $(OCP_PROD_GATEWAY_NAME)
+
+ocp-prod-env:  ## Generate ./.env.ocp-prod from current prod deployment (spits out values)
+	@host="$(OCP_PROD_HOSTNAME)"; \
+	domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
+	if [ -z "$$host" ]; then \
+		if [ -z "$$domain" ]; then \
+			echo "error: could not read the cluster's default Ingress domain." >&2; \
+			exit 1; \
+		fi; \
+		host="$(OCP_PROD_RELEASE)-$(OCP_PROD_PROJECT).$$domain"; \
+	fi; \
+	khost="$(OCP_PROD_KEYCLOAK_HOST)"; \
+	if [ -z "$$khost" ]; then \
+		if [ -z "$$domain" ]; then \
+			domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
+		fi; \
+		if [ -z "$$domain" ]; then \
+			echo "error: could not determine Keycloak host domain." >&2; \
+			exit 1; \
+		fi; \
+		khost="keycloak-$(OCP_PROD_PROJECT).$$domain"; \
+	fi; \
+	issuer="$(OCP_PROD_OIDC_ISSUER)"; \
+	if [ -z "$$issuer" ]; then \
+		issuer="http://$$khost/realms/openshell"; \
+	fi; \
+	audience="$(OCP_PROD_OIDC_AUDIENCE)"; \
+	if [ -z "$$audience" ]; then audience="openshell-cli"; fi; \
+	gateway_url="https://$$host"; \
+	printf "OPENSHELL_OIDC_CLIENT_SECRET=\nOPENSHELL_OIDC_CLIENT_ID=openshell-cli\nOPENSHELL_OIDC_ISSUER=%s\nOPENSHELL_OIDC_AUDIENCE=%s\nOPENSHELL_GATEWAY_URL=%s\nOPENSHELL_SA_SUBJECT=\n" "$$issuer" "$$audience" "$$gateway_url" > .env.ocp-prod; \
+	cat .env.ocp-prod; \
+	echo ""; \
+	echo "Wrote ./.env.ocp-prod (CLIENT_SECRET/SA_SUBJECT intentionally empty for public openshell-cli)"
 
 ocp-prod-test-eacces-repro:  ## Test for the OCP kubernetes-driver EACCES-on-later-layer-content bug (requires ocp-prod-register first)
 	./ocp/test-eacces-repro.sh $(OCP_PROD_GATEWAY_NAME) $(OCP_PROD_PROJECT) $(OCP_PROD_SANDBOX_IMAGE)
 
-ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up  ## One-shot prod deploy on a brand-new cluster: bootstraps self-signed CA + dev Keycloak, computes a hostname, deploys, and registers
-	@host="$(OCP_PROD_HOSTNAME)"; \
+ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up  ## One-shot prod deploy on a brand-new cluster: bootstraps self-signed CA + dev Keycloak, computes a hostname, deploys, and registers (Keycloak via Route, no port-forward)
+	@set -e; \
+	host="$(OCP_PROD_HOSTNAME)"; \
+	domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
 	if [ -z "$$host" ]; then \
-		domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
 		if [ -z "$$domain" ]; then \
 			echo "error: could not read the cluster's default Ingress domain (ingresses.config.openshift.io/cluster)." >&2; \
 			echo "Set OCP_PROD_HOSTNAME explicitly instead, e.g.:" >&2; \
@@ -421,9 +517,22 @@ ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned 
 		host="$(OCP_PROD_RELEASE)-$(OCP_PROD_PROJECT).$$domain"; \
 		echo "OCP_PROD_HOSTNAME not set -- using cluster default: $$host"; \
 	fi; \
+	khost="$(OCP_PROD_KEYCLOAK_HOST)"; \
+	if [ -z "$$khost" ]; then \
+		if [ -z "$$domain" ]; then \
+			domain=$$(oc get ingresses.config.openshift.io cluster -o jsonpath='{.spec.domain}' 2>/dev/null); \
+		fi; \
+		if [ -z "$$domain" ]; then \
+			echo "error: could not determine Keycloak host domain." >&2; \
+			exit 1; \
+		fi; \
+		khost="keycloak-$(OCP_PROD_PROJECT).$$domain"; \
+		echo "OCP_PROD_KEYCLOAK_HOST not set -- using $$khost"; \
+	fi; \
+	$(MAKE) ocp-prod-keycloak-route OCP_PROD_KEYCLOAK_HOST="$$khost"; \
 	issuer="$(OCP_PROD_OIDC_ISSUER)"; \
 	if [ -z "$$issuer" ]; then \
-		issuer="http://keycloak.keycloak.svc.cluster.local:9090/realms/openshell"; \
+		issuer="http://$$khost/realms/openshell"; \
 	fi; \
 	$(MAKE) ocp-prod-openshell-up \
 		OCP_PROD_HOSTNAME="$$host" \
@@ -431,6 +540,10 @@ ocp-prod-quickstart: ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned 
 		OCP_PROD_OIDC_ISSUER="$$issuer"; \
 	$(MAKE) ocp-prod-register \
 		OCP_PROD_HOSTNAME="$$host" \
+		OCP_PROD_OIDC_ISSUER="$$issuer"; \
+	$(MAKE) ocp-prod-env \
+		OCP_PROD_HOSTNAME="$$host" \
+		OCP_PROD_KEYCLOAK_HOST="$$khost" \
 		OCP_PROD_OIDC_ISSUER="$$issuer"
 
 # ---------- Help ----------
