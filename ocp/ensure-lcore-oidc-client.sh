@@ -171,8 +171,11 @@ if [ -z "${CLIENT_SECRET}" ]; then
 fi
 
 echo "[lcore-client] Reading service-account user id (the gateway-visible sub)..."
+# `|| true`: with `set -o pipefail`, a grep-no-match (e.g. service-account
+# user not yet present) would otherwise kill the script via `set -e` before
+# reaching the empty-check warning below.
 SA_SUBJECT="$(kc get "clients/${CLIENT_UUID}/service-account-user" -r "${REALM}" 2>/dev/null \
-  | tr -d '\r' | grep -o '"id"[^,}]*' | sed 's/.*: *"\(.*\)".*/\1/' | head -n1)"
+  | tr -d '\r' | grep -o '"id"[^,}]*' | sed 's/.*: *"\(.*\)".*/\1/' | head -n1 || true)"
 if [ -z "${SA_SUBJECT}" ]; then
   echo "warning: could not read the service-account user id -- leaving SA_SUBJECT empty." >&2
 fi
@@ -246,8 +249,11 @@ else
   if [ "${GATEWAY_INSECURE}" = "true" ]; then insecure_flag="--gateway-insecure"; fi
   echo "[lcore-client] Ensuring service account ${SA_SUBJECT} is an '${WORKSPACE_ROLE}' of workspace '${WORKSPACE}'..."
   # Grab the current role from the member list row ("<subject>  <role>"), if any.
+  # `|| true` below: with `set -o pipefail`, grep finding no row (the normal
+  # first-run case: subject not yet a member) would otherwise kill the script
+  # via `set -e` with no diagnostic before the add below.
   current_role="$("${OPENSHELL_CLI}" ${insecure_flag} -g "${GATEWAY_NAME}" workspace member list --workspace "${WORKSPACE}" 2>/dev/null \
-    | grep "${SA_SUBJECT}" | awk '{print $NF}' | head -n1)"
+    | grep "${SA_SUBJECT}" | awk '{print $NF}' | head -n1 || true)"
   if [ "${current_role}" = "${WORKSPACE_ROLE}" ]; then
     echo "[lcore-client] Already an '${WORKSPACE_ROLE}' of '${WORKSPACE}'."
   else
