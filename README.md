@@ -127,6 +127,20 @@ kubectl --kubeconfig kind/kubeconfig -n openshell-k8s create secret \
   generic lightspeed-stack-llm-secret --from-literal=OPENAI_API_KEY="$OPENAI_API_KEY"
 ```
 
+### Mock pod-status MCP server on Kind
+
+Deterministic tools (`get_pod_status`/`get_pods`/`describe_pod`/`get_pod_logs`, `memoryLimit=347Mi`) backing
+the lightspeed-stack `*-none-tools` demo scenarios and e2e seam test —
+lets an in-process agent prove it really called a tool instead of
+hallucinating. Same `openshell` namespace as the stack, reached
+in-cluster at `http://mcp-pod-status-mock:8084/mcp`:
+
+```bash
+make kind-mcp-pod-status-up    # build + kind load + deploy/restart it
+make kind-mcp-pod-status-logs  # tail its logs
+make kind-mcp-pod-status-down  # remove it
+```
+
 ## OpenShift — Eval
 
 Deploys the real OpenShell Helm chart to an existing OpenShift project via
@@ -308,6 +322,21 @@ JWKS, and its logged discovered issuer matches token `iss` claims exactly.
 What I didn't verify is a literal `openshell gateway login` browser
 round-trip, since that needs a real, browser-reachable hostname — see
 "Registering the CLI" below.
+
+### Mock pod-status MCP server on production OCP
+
+Same mock as [Kind](#mock-pod-status-mcp-server-on-kind), built
+multi-arch (`linux/amd64` for OCP prod, `linux/arm64` for local Mac
+Podman) and pushed as one manifest list to
+`quay.io/jameswong/mcp-pod-status-mock:ocp-prod` (override with
+`MCP_POD_STATUS_IMAGE_REPO`), then deployed into `openshell-prod` —
+reached in-cluster at `http://mcp-pod-status-mock:8084/mcp`. The
+manifest sets `imagePullPolicy: Always` so a same-tag push is re-pulled
+on restart.
+
+```bash
+make ocp-prod-mcp-pod-status-up    # build + push + deploy/restart it
+```
 
 ### Variables
 

@@ -1,0 +1,63 @@
+# Mock pod-status MCP server for production OCP: deterministic tools
+# (get_pod_status/get_pods/describe_pod/get_pod_logs, memoryLimit=347Mi) backing the lightspeed-stack
+# *-none-tools demo scenarios and e2e seam test. Same project as
+# lightspeed-stack, reached in-cluster at
+# http://mcp-pod-status-mock:8084/mcp.
+#
+# Requires the image pushed where the cluster can pull it first:
+#   make ocp-prod-mcp-pod-status-build
+# The manifest sets imagePullPolicy: Always so a same-tag push is
+# guaranteed to be re-pulled on rollout restart (same pattern as
+# ocp/lightspeed-stack.yaml's ocp-harness tag).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-pod-status-mock
+  namespace: openshell-prod
+  labels:
+    app: mcp-pod-status-mock
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-pod-status-mock
+  template:
+    metadata:
+      labels:
+        app: mcp-pod-status-mock
+    spec:
+      containers:
+        - name: mcp-pod-status-mock
+          image: quay.io/jameswong/mcp-pod-status-mock:ocp-prod
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8084
+          env:
+            - name: DEMO_MCP_HOST
+              value: "0.0.0.0"
+            - name: DEMO_MCP_PORT
+              value: "8084"
+          readinessProbe:
+            tcpSocket:
+              port: 8084
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-pod-status-mock
+  namespace: openshell-prod
+spec:
+  selector:
+    app: mcp-pod-status-mock
+  ports:
+    - port: 8084
+      targetPort: 8084

@@ -1,0 +1,18 @@
+# Mock pod-status MCP server (see server.py): multi-tool FastMCP app
+# served over streamable HTTP. No fixed USER: OpenShift runs pods under an
+# arbitrary UID, and this server writes nothing (no HOME/data dir needed),
+# so the default root-owned, world-readable files work under both Kind
+# (root) and OCP restricted SCC (arbitrary UID in the root group).
+FROM docker.io/library/python:3.12-slim
+
+WORKDIR /app
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY server.py ./
+
+ENV DEMO_MCP_HOST=0.0.0.0 DEMO_MCP_PORT=8084
+
+EXPOSE 8084
+
+CMD ["python3", "/app/server.py"]

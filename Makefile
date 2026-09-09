@@ -27,6 +27,7 @@ LIGHTSPEED_CLOUD_AGENTS_REPO  ?= $(HOME)/ws/lightspeed-cloud-agents
 LIGHTSPEED_SANDBOX_REPO       ?= $(HOME)/ws/lightspeed-agentic-sandbox
 LIGHTSPEED_STACK_IMAGE_REPO   ?= quay.io/jameswong/lightspeed-stack
 LIGHTSPEED_SANDBOX_IMAGE_REPO ?= quay.io/jameswong/lightspeed-agentic-sandbox
+MCP_POD_STATUS_IMAGE_REPO     ?= quay.io/jameswong/mcp-pod-status-mock
 
 OCP_PROJECT       ?= openshell
 OCP_CHART_VERSION ?= 0.0.111
@@ -61,6 +62,8 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         kind-openshell-up kind-openshell-down kind-openshell-logs \
         kind-openshell-register kind-openshell-test-spawn \
         kind-lightspeed-build kind-lightspeed-apply kind-lightspeed-up \
+        kind-mcp-pod-status-build kind-mcp-pod-status-apply kind-mcp-pod-status-up \
+        kind-mcp-pod-status-down kind-mcp-pod-status-logs \
         ocp-eval-up ocp-eval-status ocp-eval-agent-sandbox-up \
         ocp-eval-openshell-up ocp-eval-openshell-down ocp-eval-openshell-logs \
         ocp-eval-port-forward ocp-eval-register ocp-eval-test-eacces-repro \
@@ -69,6 +72,8 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
         ocp-prod-cert-manager-up ocp-prod-clusterissuer-selfsigned ocp-prod-keycloak-up ocp-prod-keycloak-route ocp-prod-keycloak-lcore-client \
         ocp-prod-openshell-up ocp-prod-openshell-down ocp-prod-openshell-logs \
         ocp-prod-lightspeed-build ocp-prod-lightspeed-apply ocp-prod-lightspeed-up \
+        ocp-prod-mcp-pod-status-build ocp-prod-mcp-pod-status-apply ocp-prod-mcp-pod-status-up \
+        ocp-prod-mcp-pod-status-down ocp-prod-mcp-pod-status-logs \
         ocp-prod-register ocp-prod-quickstart ocp-prod-test-eacces-repro
 
 # ---------- Podman Compose ----------
@@ -228,6 +233,26 @@ kind-lightspeed-apply: kind-openshell-up  ## Apply lightspeed-stack to Kind, res
 	@$(KUBECTL) -n $(KIND_OPENSHELL_NS) rollout status deployment/lightspeed-stack --timeout=180s
 
 kind-lightspeed-up: kind-lightspeed-build kind-lightspeed-apply  ## Build lightspeed-stack from clean main and (re)deploy it to Kind alongside the gateway
+
+kind-mcp-pod-status-build:  ## Build the mock pod-status MCP image and load it into Kind
+	podman build --platform linux/arm64 -f mcp-pod-status-mock/Containerfile -t localhost/mcp-pod-status-mock:kind-test mcp-pod-status-mock
+	TAR=$$(mktemp -t mcp-pod-status-mock-kind-test-XXXXXX.tar); \
+	trap 'rm -f "$$TAR"' EXIT INT TERM; \
+	podman save localhost/mcp-pod-status-mock:kind-test -o "$$TAR" && \
+	KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "$$TAR" --name $(KIND_CLUSTER)
+
+kind-mcp-pod-status-apply:  ## Deploy the mock pod-status MCP server to Kind (requires kind-mcp-pod-status-build first)
+	@$(KUBECTL) create namespace openshell --dry-run=client -o yaml | $(KUBECTL) apply -f -
+	@$(KUBECTL) apply -f kind/mcp-pod-status-mock.yaml
+	@$(KUBECTL) -n openshell rollout status deployment/mcp-pod-status-mock --timeout=120s
+
+kind-mcp-pod-status-up: kind-mcp-pod-status-build kind-mcp-pod-status-apply  ## Build and deploy the mock pod-status MCP server to Kind
+
+kind-mcp-pod-status-down:  ## Remove the mock pod-status MCP server from Kind
+	@$(KUBECTL) -n openshell delete deployment/mcp-pod-status-mock service/mcp-pod-status-mock --ignore-not-found
+
+kind-mcp-pod-status-logs:  ## Tail mock pod-status MCP logs in Kind
+	$(KUBECTL) -n openshell logs -f deployment/mcp-pod-status-mock
 
 # ---------- OpenShift (oc) ----------
 #
@@ -461,6 +486,24 @@ ocp-prod-lightspeed-apply:  ## Apply lightspeed-stack to the production project,
 	@oc -n $(OCP_PROD_PROJECT) rollout status deployment/lightspeed-stack --timeout=180s
 
 ocp-prod-lightspeed-up: ocp-prod-lightspeed-build ocp-prod-lightspeed-apply  ## Build lightspeed-stack from clean main and (re)deploy it to production OpenShift
+
+ocp-prod-mcp-pod-status-build:  ## Build a multi-arch (amd64+arm64) mock pod-status MCP image and push it
+	podman manifest rm $(MCP_POD_STATUS_IMAGE_REPO):ocp-prod >/dev/null 2>&1 || true
+	podman rmi $(MCP_POD_STATUS_IMAGE_REPO):ocp-prod >/dev/null 2>&1 || true
+	podman build --platform linux/amd64,linux/arm64 --manifest $(MCP_POD_STATUS_IMAGE_REPO):ocp-prod -f mcp-pod-status-mock/Containerfile mcp-pod-status-mock
+	podman manifest push $(MCP_POD_STATUS_IMAGE_REPO):ocp-prod docker://$(MCP_POD_STATUS_IMAGE_REPO):ocp-prod
+
+ocp-prod-mcp-pod-status-apply: ocp-prod-up  ## Deploy the mock pod-status MCP server to production OpenShift (requires ocp-prod-mcp-pod-status-build first)
+	@oc -n $(OCP_PROD_PROJECT) apply -f ocp/mcp-pod-status-mock.yaml
+	@oc -n $(OCP_PROD_PROJECT) rollout status deployment/mcp-pod-status-mock --timeout=120s
+
+ocp-prod-mcp-pod-status-up: ocp-prod-mcp-pod-status-build ocp-prod-mcp-pod-status-apply  ## Build, push, and deploy the mock pod-status MCP server to production OpenShift
+
+ocp-prod-mcp-pod-status-down:  ## Remove the mock pod-status MCP server from production
+	@oc -n $(OCP_PROD_PROJECT) delete deployment/mcp-pod-status-mock service/mcp-pod-status-mock --ignore-not-found
+
+ocp-prod-mcp-pod-status-logs:  ## Tail mock pod-status MCP logs in production
+	oc -n $(OCP_PROD_PROJECT) logs -f deployment/mcp-pod-status-mock
 
 ocp-prod-register:  ## Register the production gateway with the OpenShell CLI over OIDC
 	@if [ -z "$(OCP_PROD_HOSTNAME)" ] || [ -z "$(OCP_PROD_OIDC_ISSUER)" ]; then \
