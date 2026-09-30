@@ -7,7 +7,7 @@ from a local Podman stack up to a production-shaped OpenShift deployment.
 
 | Environment | What it's for | Sandboxes run via | Get started |
 |---|---|---|---|
-| [Podman](#podman) | Fastest local loop | Podman socket (DooD) | `make up` |
+| [Podman](#podman) | Fastest local loop | Podman socket (DooD) | `make podman-openshell-up` |
 | [Kind](#kind-local-kubernetes) | Testing the Kubernetes compute driver locally | Agent Sandbox controller | `make kind-up` |
 | [OpenShift — Eval](#openshift--eval) | Quick test against a real OCP cluster | Agent Sandbox controller | `make ocp-eval-openshell-up` |
 | [OpenShift — Production](#openshift--production) | Real TLS + OIDC on OCP | Agent Sandbox controller | `make ocp-prod-openshell-up` |
@@ -17,9 +17,10 @@ Run `make help` for the full target list at any time.
 ## Podman
 
 ```bash
-make up          # start everything (OTel + Jaeger + gateway)
-make register    # register gateway with CLI (one-time)
-make jaeger      # open Jaeger UI
+make podman-obs-up             # start OTel + Jaeger
+make podman-openshell-up       # initialize JWT keys and start the gateway
+make podman-openshell-register # register the gateway with the CLI (one-time)
+make podman-obs-jaeger          # open Jaeger UI
 ```
 
 ### Services
@@ -35,31 +36,38 @@ make jaeger      # open Jaeger UI
 ### Using the gateway
 
 ```bash
-openshell sandbox create -- claude   # create a sandbox
-make gateway-health                  # check gateway health
+openshell sandbox create -- claude       # create a sandbox
+make podman-openshell-health              # check gateway health
 ```
 
 ### Configuration
 
 Gateway settings live in `gateway.toml`. The Podman compute driver is pre-configured.
+The Compose file pins gateway `0.0.116`, which matches the OpenShell client
+version currently used by the Lightspeed cloud-agents dependency. Override the
+image tag deliberately when upgrading both sides together.
 
 The gateway container needs access to the Podman socket. The compose file defaults to `/run/user/501/podman/podman.sock`. Override with:
 
 ```bash
-PODMAN_SOCK=/path/to/podman.sock make up
+PODMAN_SOCK=/path/to/podman.sock make podman-openshell-up
 ```
+
+On a fresh Podman machine, `podman-openshell-up` creates the named
+`openshell-certs` volume and generates the JWT files required by the gateway.
+Use `OPENSHELL_CERTS_VOLUME` to choose a different volume name.
 
 ### Make targets
 
 ```
-make up               Start everything (OTel + Jaeger + gateway)
-make down             Stop everything
-make logs             Tail OTel collector logs
-make gateway-logs     Tail gateway logs
-make gateway-health   Check gateway health
-make jaeger           Open Jaeger UI in browser
-make status           Show running containers
-make register         Register gateway with the OpenShell CLI (one-time)
+make podman-obs-up              Start OTel + Jaeger
+make podman-openshell-up       Initialize keys and start the gateway
+make podman-openshell-down     Stop the gateway
+make podman-openshell-logs     Tail gateway logs
+make podman-openshell-health   Check gateway health
+make podman-obs-jaeger          Open Jaeger UI in browser
+make podman-status              Show running containers
+make podman-openshell-register Register the gateway with the OpenShell CLI
 ```
 
 ### Architecture

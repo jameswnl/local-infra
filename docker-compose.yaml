@@ -31,7 +31,7 @@ services:
   # ---------- OpenShell Gateway ----------
 
   gateway:
-    image: ghcr.io/nvidia/openshell/gateway:${IMAGE_TAG:-latest}
+    image: ghcr.io/nvidia/openshell/gateway:${IMAGE_TAG:-0.0.116}
     restart: unless-stopped
 
     # Clear default CMD so gateway.toml owns all settings.
@@ -43,7 +43,8 @@ services:
     userns_mode: keep-id:uid=0,gid=0
 
     ports:
-      - "127.0.0.1:${OPENSHELL_PORT:-9081}:8080"
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
 
     volumes:
       # Podman socket — lets the gateway create and manage sandbox containers.
@@ -72,4 +73,4 @@ services:
 volumes:
   openshell-data:
   openshell-certs:
-    external: true
+    name: ${OPENSHELL_CERTS_VOLUME:-openshell-certs}
