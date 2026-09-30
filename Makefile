@@ -29,6 +29,10 @@ LIGHTSPEED_STACK_IMAGE_REPO   ?= quay.io/jameswong/lightspeed-stack
 LIGHTSPEED_SANDBOX_IMAGE_REPO ?= quay.io/jameswong/lightspeed-agentic-sandbox
 MCP_POD_STATUS_IMAGE_REPO     ?= quay.io/jameswong/mcp-pod-status-mock
 
+IMAGE_TAG                 ?= 0.0.116
+OPENSHELL_CERTS_VOLUME    ?= openshell-certs
+OPENSHELL_GATEWAY_IMAGE   ?= ghcr.io/nvidia/openshell/gateway:$(IMAGE_TAG)
+
 OCP_PROJECT       ?= openshell
 OCP_CHART_VERSION ?= 0.0.111
 OCP_GATEWAY_NAME  ?= ocp
@@ -57,7 +61,7 @@ OCP_PROD_SELFSIGNED_CA_SECRET   ?= openshell-selfsigned-ca-tls
 
 export KIND_EXPERIMENTAL_PROVIDER=podman
 
-.PHONY: podman-obs-up podman-obs-down podman-obs-logs podman-obs-jaeger podman-openshell-up podman-openshell-down podman-openshell-logs podman-openshell-register podman-openshell-health podman-down podman-logs podman-status help \
+.PHONY: podman-obs-up podman-obs-down podman-obs-logs podman-obs-jaeger podman-openshell-init-certs podman-openshell-up podman-openshell-down podman-openshell-logs podman-openshell-register podman-openshell-health podman-down podman-logs podman-status help \
         kind-up kind-down kind-status kind-agent-sandbox-up \
         kind-openshell-up kind-openshell-down kind-openshell-logs \
         kind-openshell-register kind-openshell-test-spawn \
@@ -78,6 +82,15 @@ export KIND_EXPERIMENTAL_PROVIDER=podman
 
 # ---------- Podman Compose ----------
 
+podman-openshell-init-certs:  ## Create the OpenShell JWT volume and keys when missing
+	@if ! podman volume inspect $(OPENSHELL_CERTS_VOLUME) >/dev/null 2>&1; then \
+		podman volume create $(OPENSHELL_CERTS_VOLUME) >/dev/null; \
+	fi
+	@if ! podman run --rm -v $(OPENSHELL_CERTS_VOLUME):/certs:ro docker.io/library/alpine:3.20 sh -c 'test -f /certs/jwt/signing.pem && test -f /certs/jwt/public.pem && test -f /certs/jwt/kid'; then \
+		echo "[openshell] generating JWT signing keys in $(OPENSHELL_CERTS_VOLUME)..."; \
+		podman run --rm --user 0:0 -v $(OPENSHELL_CERTS_VOLUME):/out $(OPENSHELL_GATEWAY_IMAGE) generate-certs --output-dir /out; \
+	fi
+
 podman-obs-up:  ## Start observability stack (OTel + Jaeger) via Podman
 	podman compose up -d otel-collector jaeger
 	@echo ""
@@ -96,10 +109,11 @@ podman-obs-logs:  ## Tail observability logs (OTel + Jaeger) via Podman
 podman-obs-jaeger:  ## Open Jaeger UI in browser (observability)
 	@open http://localhost:16686 2>/dev/null || xdg-open http://localhost:16686 2>/dev/null || true
 
-podman-openshell-up:  ## Start OpenShell gateway via Podman
+podman-openshell-up: podman-openshell-init-certs  ## Start OpenShell gateway via Podman
 	podman compose up -d gateway
 	@echo ""
-	@echo "OpenShell: http://localhost:9081"
+	@echo "OpenShell: http://localhost:8080"
+	@echo "Health:    http://localhost:8081/healthz"
 	@echo ""
 	@echo "Register (one-time):  make podman-openshell-register"
 
@@ -110,11 +124,11 @@ podman-openshell-down:  ## Stop OpenShell gateway via Podman
 podman-openshell-logs:  ## Tail OpenShell logs via Podman
 	podman compose logs -f gateway
 
-podman-openshell-health:  ## Check Podman OpenShell health (internal)
-	@curl -sf http://localhost:8081/healthz 2>&1 | head -n 1 && echo " OK" || echo " UNHEALTHY (health is internal-only, use podman exec if needed)"
+podman-openshell-health:  ## Check Podman OpenShell health
+	@curl -sf http://localhost:8081/healthz 2>&1 | head -n 1 && echo " OK" || echo " UNHEALTHY"
 
 podman-openshell-register:  ## Register Podman OpenShell gateway with CLI (one-time)
-	openshell gateway add http://localhost:9081 --name local-podman
+	openshell gateway add http://localhost:8080 --name local-podman
 
 podman-down:  ## Stop everything (all Podman services)
 	podman compose down
